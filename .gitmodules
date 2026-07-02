@@ -1,0 +1,8 @@
+[submodule "SAS"]
+	path = SAS
+	url = https://github.com/PraetorianDevices/SAS.git
+	branch = develop
+[submodule "QGroundControl"]
+	path = QGroundControl
+	url = https://github.com/PraetorianDevices/QGroundControl.git
+	branch = develop
