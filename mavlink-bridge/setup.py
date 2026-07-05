@@ -13,6 +13,7 @@ setup(
         'console_scripts': [
             'gps_spoof_mavlink_bridge = gps_spoof_mavlink_bridge:main',
             'telemetry_mavlink_bridge = telemetry_mavlink_bridge:main',
+            'mission_control_bridge = mission_control_bridge:main',
             'test_gps_spoof_alert_generator = test_gps_spoof_alert_generator:main',
         ],
     },

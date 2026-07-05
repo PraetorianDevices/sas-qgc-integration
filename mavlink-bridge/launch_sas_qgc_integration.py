@@ -96,6 +96,21 @@ def generate_launch_description():
         output='screen'
     )
 
+    # ===== Mission Control Bridge =====
+    mission_bridge = Node(
+        package='mavlink-bridge',
+        executable='mission_control_bridge',
+        namespace='/',
+        parameters=[
+            {'system_id': LaunchConfiguration('system_id')},
+            {'component_id': 1},  # MAV_COMP_ID_AUTOPILOT
+            {'drone_id': LaunchConfiguration('drone_id')},
+            {'mavlink_host': LaunchConfiguration('mavlink_host')},
+            {'mavlink_port': LaunchConfiguration('mavlink_port')},
+        ],
+        output='screen'
+    )
+
     # ===== Info Messages =====
     detector_started = LogInfo(msg='GPS Spoofing Detector: monitoring for spoofing attacks')
     gps_bridge_started = LogInfo(msg='GPS Spoof Bridge: /gps_spoof_alert -> MAVLink STATUSTEXT')
@@ -110,6 +125,10 @@ def generate_launch_description():
         '  - ATTITUDE (roll/pitch/yaw)\n',
         '  - SYS_STATUS (battery, CPU)\n',
         '  - BATTERY_STATUS (detailed power info)\n',
+        'Mission Control:\n',
+        '  - MISSION_ITEM (waypoint upload/download)\n',
+        '  - MISSION_CURRENT (active waypoint tracking)\n',
+        '  - MISSION_ACK (mission acknowledgement)\n',
         'Alerts:\n',
         '  - STATUSTEXT (GPS spoofing warnings/critical)\n',
         '\n',
@@ -131,4 +150,5 @@ def generate_launch_description():
         gps_spoof_detector,
         gps_spoof_bridge,
         telemetry_bridge,
+        mission_bridge,
     ])
