@@ -4,34 +4,43 @@
 Mission Control Bridge: QGroundControl ↔ SAS Mission Executor
 
 Bridges MAVLink mission commands from QGC to the SAS mission_executor_node,
-enabling real-time mission upload, progress tracking, and waypoint editing.
+enabling real-time mission upload, progress tracking, and waypoint download.
 
 MAVLink Messages Handled:
-  - MISSION_REQUEST_LIST (from QGC) → list missions on drone
-  - MISSION_COUNT (to QGC) → report number of waypoints
-  - MISSION_REQUEST (from QGC) → request specific waypoint
-  - MISSION_ITEM (bidirectional) → waypoint data
+  - MISSION_REQUEST_LIST (from QGC) → QGC asking to download our mission
+  - MISSION_COUNT (bidirectional) → announces how many items follow
+  - MISSION_REQUEST_INT / MISSION_REQUEST (from QGC) → request a specific waypoint
+  - MISSION_ITEM_INT (bidirectional) → waypoint data (lat/lon scaled by 1e7)
   - MISSION_ACK (to QGC) → mission accepted/rejected
-  - MISSION_CURRENT (to QGC) → current waypoint index
+  - MISSION_CURRENT (to QGC) → current waypoint index + total
   - MISSION_ITEM_REACHED (to QGC) → waypoint reached event
 
-Architecture:
-  QGroundControl
-    ↓ (MAVLink UDP 14550)
-  mission_control_bridge (ROS 2 node)
-    ├→ Receives MISSION_* messages from UDP
-    ├→ Converts to ROS 2 topics/services
-    ├→ Publishes to mission_executor_node
-    └→ Receives mission progress
-        ↓
-    Publishes back to UDP as MAVLink
+Upload handshake (QGC → vehicle), per the real MAVLink mission protocol:
+  1. QGC sends MISSION_COUNT announcing N items
+  2. We request each item in sequence via MISSION_REQUEST_INT
+  3. QGC responds with MISSION_ITEM_INT for each requested seq
+  4. After the last item, we send a single MISSION_ACK and publish the
+     assembled mission to mission_executor_node
+
+Download handshake (vehicle → QGC) — unchanged in spirit from before, now
+using the corrected wire format:
+  1. QGC sends MISSION_REQUEST_LIST
+  2. We respond with MISSION_COUNT
+  3. QGC requests each item via MISSION_REQUEST_INT / MISSION_REQUEST
+  4. We respond with MISSION_ITEM_INT for each
+
+All frame encoding/decoding goes through mavlink_v2.py, which is verified
+byte-for-byte against pymavlink — this bridge previously built a
+non-standard 7-byte frame header (STX, LEN, INCOMPAT_FLAGS, MSG_ID, SYSID,
+COMPID, SEQ) instead of the real 10-byte MAVLink 2.0 header, and used ad hoc
+payload layouts for MISSION_ACK/MISSION_CURRENT/MISSION_COUNT that didn't
+match the spec at all. None of it was parseable by a real MAVLink peer.
 
 Author: Claude Code
-Date: 2026-07-05
+Date: 2026-07-09
 """
 
 import json
-import struct
 import socket
 import threading
 import time
@@ -43,9 +52,11 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from std_msgs.msg import String
 
+import mavlink_v2 as mav
+
 
 class MAVMissionType(IntEnum):
-    """MAVLink mission item types."""
+    """MAV_CMD values carried in a mission item's `command` field."""
     NAV_WAYPOINT = 16
     NAV_LOITER_UNLIM = 17
     NAV_LOITER_TURNS = 18
@@ -56,34 +67,19 @@ class MAVMissionType(IntEnum):
     DO_CHANGE_SPEED = 178
 
 
-class MAVMissionResult(IntEnum):
-    """MAVLink mission acknowledgement codes."""
-    ACCEPTED = 0
-    ERROR = 1
-    UNSUPPORTED_FRAME = 2
-    UNSUPPORTED_COMMAND = 3
-
-
 class MissionControlBridge(Node):
     """
     Bidirectional bridge between QGroundControl and SAS mission executor.
 
     Responsibilities:
     1. Receive MAVLink mission messages from QGC (UDP)
-    2. Convert to ROS 2 mission format
-    3. Send to mission_executor_node
-    4. Track mission progress
-    5. Send mission status back to QGC
+    2. Run the real mission-protocol upload handshake and assemble the
+       received waypoints into the QGC .plan JSON format mission_executor_node
+       already parses
+    3. Publish the assembled mission to mission_executor_node
+    4. Track mission progress and report it back to QGC
+    5. Serve mission download requests from QGC
     """
-
-    # MAVLink message IDs
-    MAVLINK_MSG_ID_MISSION_REQUEST_LIST = 43
-    MAVLINK_MSG_ID_MISSION_COUNT = 44
-    MAVLINK_MSG_ID_MISSION_REQUEST = 40
-    MAVLINK_MSG_ID_MISSION_ITEM = 39
-    MAVLINK_MSG_ID_MISSION_ACK = 47
-    MAVLINK_MSG_ID_MISSION_CURRENT = 42
-    MAVLINK_MSG_ID_MISSION_ITEM_REACHED = 61
 
     def __init__(self):
         super().__init__('mission_control_bridge')
@@ -121,10 +117,32 @@ class MissionControlBridge(Node):
             self.get_logger().error(f'Failed to bind UDP socket: {e}')
             self._socket = None
 
-        # Mission state
-        self._mission_items: List[Dict] = []
+        # Fallback destination for outbound frames sent before any inbound
+        # packet has been seen (e.g. the periodic MISSION_CURRENT timer).
+        # Once a real sender is observed, replies target that address instead
+        # -- see _handle_mavlink_message / _send_mavlink_frame. Previously
+        # every outbound frame was hardcoded to ('localhost', 14550)
+        # regardless of this configuration, which silently broke the
+        # documented multi-drone setup (different mavlink_port per drone).
+        self._reply_addr = (mavlink_host, mavlink_port)
+
+        # Last-seen GCS identity, learned from incoming frames, used as the
+        # target_system/target_component of our outbound targeted messages.
+        # Defaults to QGC's conventional system_id (255) until we hear from it.
+        self._gcs_system_id = 255
+        self._gcs_component_id = 0
+
+        # Mission state (download direction: what we report back to QGC on request)
+        self._mission_items: List[Optional[Dict]] = []
         self._current_waypoint = 0
         self._mission_in_progress = False
+
+        # Upload state (QGC -> vehicle): items being received one at a time via
+        # the MISSION_COUNT -> MISSION_REQUEST_INT -> MISSION_ITEM_INT handshake,
+        # pending assembly until every item 0..count-1 has arrived.
+        self._upload_items: List[Optional[Dict]] = []
+        self._upload_expected_count = 0
+        self._upload_in_progress = False
 
         # QoS profile
         qos = QoSProfile(
@@ -139,11 +157,15 @@ class MissionControlBridge(Node):
             String, f'{self.topic_prefix}/mission_executor/load_mission', qos
         )
 
+        # mission_executor_node publishes its status with default (VOLATILE) QoS;
+        # a TRANSIENT_LOCAL subscriber would never match a VOLATILE publisher under
+        # DDS QoS-compatibility rules, so this subscription intentionally does not
+        # reuse the TRANSIENT_LOCAL `qos` profile above.
         self._mission_status_sub = self.create_subscription(
             String,
             f'{self.topic_prefix}/mission_executor/status',
             self._cb_mission_status,
-            qos
+            10
         )
 
         # UDP receiver thread
@@ -164,7 +186,7 @@ class MissionControlBridge(Node):
                     continue
 
                 data, addr = self._socket.recvfrom(1024)
-                self._handle_mavlink_message(data)
+                self._handle_mavlink_message(data, addr)
             except socket.timeout:
                 pass
             except OSError:
@@ -172,107 +194,159 @@ class MissionControlBridge(Node):
             except Exception as e:
                 self.get_logger().warn(f'Error in receiver loop: {e}')
 
-    def _handle_mavlink_message(self, data: bytes):
+    def _handle_mavlink_message(self, data: bytes, addr=None):
         """Process incoming MAVLink message."""
-        if len(data) < 10:
+        parsed = mav.parse_frame(data)
+        if parsed is None or not parsed.valid:
             return
 
-        # Parse minimal header to identify message type
+        self._gcs_system_id = parsed.system_id
+        self._gcs_component_id = parsed.component_id
+        if addr is not None:
+            self._reply_addr = addr
+
         try:
-            stx = data[0]
-            if stx != 0xFD:
-                return
-
-            msg_id = data[3]
-            system_id = data[4]
-            component_id = data[5]
-
-            # Route to handler
-            if msg_id == self.MAVLINK_MSG_ID_MISSION_REQUEST_LIST:
+            if parsed.msg_id == mav.MAVLINK_MSG_ID_MISSION_REQUEST_LIST:
                 self._handle_mission_request_list()
-            elif msg_id == self.MAVLINK_MSG_ID_MISSION_ITEM:
-                self._handle_mission_item(data)
-            elif msg_id == self.MAVLINK_MSG_ID_MISSION_REQUEST:
-                self._handle_mission_request(data)
+            elif parsed.msg_id == mav.MAVLINK_MSG_ID_MISSION_COUNT:
+                self._handle_mission_count(parsed.payload)
+            elif parsed.msg_id == mav.MAVLINK_MSG_ID_MISSION_ITEM_INT:
+                self._handle_mission_item_int(parsed.payload)
+            elif parsed.msg_id in (mav.MAVLINK_MSG_ID_MISSION_REQUEST,
+                                    mav.MAVLINK_MSG_ID_MISSION_REQUEST_INT):
+                self._handle_mission_request(parsed.payload)
         except Exception as e:
-            self.get_logger().warn(f'Error handling MAVLink message: {e}')
+            self.get_logger().warn(f'Error handling MAVLink message (id={parsed.msg_id}): {e}')
+
+    # ===== Upload handshake: QGC -> vehicle =====
 
     def _handle_mission_request_list(self):
-        """QGC is requesting the list of waypoints."""
+        """QGC wants to download our current mission (download direction)."""
         self.get_logger().info('MISSION_REQUEST_LIST received from QGC')
-        # Send MISSION_COUNT with current mission size
         self._send_mission_count(len(self._mission_items))
 
-    def _handle_mission_item(self, data: bytes):
-        """QGC is uploading a waypoint."""
-        try:
-            payload = data[7:-2]  # Extract payload (skip header and CRC)
+    def _handle_mission_count(self, payload: bytes):
+        """QGC is announcing it wants to upload a mission of this size.
 
-            # Parse MISSION_ITEM (39 bytes minimum)
-            if len(payload) < 37:
-                return
+        This is the message that actually starts an upload; the previous
+        implementation had no handler for it and instead reacted to
+        unsolicited MISSION_ITEM messages that a real QGC never sends
+        without being asked first.
+        """
+        parsed = mav.parse_mission_count(payload)
+        if parsed is None:
+            return
 
-            # Extract key fields
-            seq = struct.unpack('<H', payload[0:2])[0]
-            frame = payload[2]
-            command = struct.unpack('<H', payload[3:5])[0]
-            current = payload[5]
-            autocontinue = payload[6]
-            param1 = struct.unpack('<f', payload[7:11])[0]
-            param2 = struct.unpack('<f', payload[11:15])[0]
-            param3 = struct.unpack('<f', payload[15:19])[0]
-            param4 = struct.unpack('<f', payload[19:23])[0]
-            x = struct.unpack('<i', payload[23:27])[0]  # lat in 1e7 degrees
-            y = struct.unpack('<i', payload[27:31])[0]  # lon in 1e7 degrees
-            z = struct.unpack('<f', payload[31:35])[0]  # altitude in meters
+        count = parsed['count']
+        self.get_logger().info(f'MISSION_COUNT received from QGC: {count} item(s) incoming')
 
-            # Convert MAVLink mission item to SAS format
-            mission_item = {
-                'sequence': seq,
-                'frame': frame,  # 0=MAV_FRAME_GLOBAL, 3=MAV_FRAME_GLOBAL_RELATIVE_ALT
-                'command': command,
-                'current': current,
-                'autocontinue': autocontinue,
-                'params': [param1, param2, param3, param4],
-                'position': {
-                    'latitude': x / 1e7,
-                    'longitude': y / 1e7,
-                    'altitude': z
-                }
-            }
+        self._upload_items = [None] * count
+        self._upload_expected_count = count
+        self._upload_in_progress = count > 0
 
-            # Store or update waypoint
-            while len(self._mission_items) <= seq:
-                self._mission_items.append(None)
-            self._mission_items[seq] = mission_item
+        if count == 0:
+            # Empty mission upload (e.g. "clear mission") — nothing to request.
+            self._send_mission_ack(mav.MAVMissionResult.ACCEPTED)
+            return
 
-            self.get_logger().info(f'Received waypoint {seq}: ({mission_item["position"]["latitude"]}, {mission_item["position"]["longitude"]}, {mission_item["position"]["altitude"]}m)')
+        self._send_mission_request_int(0)
 
-            # Acknowledge receipt
-            self._send_mission_ack(MAVMissionResult.ACCEPTED)
-        except Exception as e:
-            self.get_logger().error(f'Error parsing MISSION_ITEM: {e}')
-            self._send_mission_ack(MAVMissionResult.ERROR)
+    def _handle_mission_item_int(self, payload: bytes):
+        """QGC is sending a waypoint we requested during an upload."""
+        item = mav.parse_mission_item_int(payload)
+        if item is None:
+            self._send_mission_ack(mav.MAVMissionResult.ERROR)
+            return
 
-    def _handle_mission_request(self, data: bytes):
-        """QGC is requesting a specific waypoint."""
-        try:
-            payload = data[7:-2]
-            seq = struct.unpack('<H', payload[0:2])[0]
+        seq = item['sequence']
+        if not self._upload_in_progress or seq >= self._upload_expected_count:
+            self.get_logger().warn(
+                f'Unexpected MISSION_ITEM_INT seq={seq} (no upload in progress)')
+            return
 
-            if seq < len(self._mission_items) and self._mission_items[seq] is not None:
-                self._send_mission_item(seq, self._mission_items[seq])
-            else:
-                self.get_logger().warn(f'Waypoint {seq} not found')
-        except Exception as e:
-            self.get_logger().error(f'Error handling MISSION_REQUEST: {e}')
+        self._upload_items[seq] = item
+        self.get_logger().info(
+            f'Received waypoint {seq}/{self._upload_expected_count - 1}: '
+            f'({item["position"]["latitude"]}, {item["position"]["longitude"]}, '
+            f'{item["position"]["altitude"]}m)'
+        )
+
+        next_seq = seq + 1
+        if next_seq < self._upload_expected_count:
+            self._send_mission_request_int(next_seq)
+            return
+
+        # All items received. The real mission protocol ACKs once, after the
+        # last item — the previous implementation incorrectly ACKed every
+        # individual item as it arrived.
+        self._complete_upload()
+
+    def _complete_upload(self):
+        """Finish an upload: adopt the received items, ACK, and publish to
+        mission_executor_node so it actually loads and can execute it."""
+        self._mission_items = list(self._upload_items)
+        self._upload_in_progress = False
+        self._send_mission_ack(mav.MAVMissionResult.ACCEPTED)
+        self._publish_mission_to_executor(self._mission_items)
+
+    def _publish_mission_to_executor(self, items: List[Optional[Dict]]):
+        """Assemble received waypoints into the QGC .plan JSON format that
+        mission_executor_node.parse_qgc_mission() already understands, and
+        publish it. This publisher previously existed but was never called —
+        a successfully received mission never reached the executor at all.
+        """
+        plan_items = []
+        for item in items:
+            if item is None:
+                continue
+            # MAVLink mission item params are param1-4 followed by lat/lon/alt
+            # (param5-7); mission_executor_node's QGC-plan parser reads
+            # lat/lon/alt from params[4]/[5]/[6] accordingly.
+            params = list(item['params']) + [
+                item['position']['latitude'],
+                item['position']['longitude'],
+                item['position']['altitude'],
+            ]
+            plan_items.append({'command': item['command'], 'params': params})
+
+        mission_plan = {
+            'fileType': 'Plan',
+            'groundStation': 'mission_control_bridge',
+            'mission': {'items': plan_items},
+        }
+
+        msg = String()
+        msg.data = json.dumps(mission_plan)
+        self._mission_upload_pub.publish(msg)
+        self.get_logger().info(
+            f'Published {len(plan_items)}-waypoint mission to mission_executor_node')
+
+    # ===== Download handshake: vehicle -> QGC =====
+
+    def _handle_mission_request(self, payload: bytes):
+        """QGC is requesting a specific waypoint (MISSION_REQUEST or
+        MISSION_REQUEST_INT — both share the same wire layout)."""
+        parsed = mav.parse_mission_request(payload)
+        if parsed is None:
+            return
+
+        seq = parsed['sequence']
+        if seq < len(self._mission_items) and self._mission_items[seq] is not None:
+            self._send_mission_item_int(seq, self._mission_items[seq])
+        else:
+            self.get_logger().warn(f'Waypoint {seq} not found')
+
+    # ===== Status / progress =====
 
     def _cb_mission_status(self, msg: String):
         """Receive mission status from mission_executor_node."""
         try:
             status = json.loads(msg.data)
             self._current_waypoint = status.get('current_waypoint', 0)
-            self._mission_in_progress = status.get('in_progress', False)
+            # mission_executor_node publishes a 'state' field (idle/loading/executing/
+            # paused/completed/interrupted/error), not 'in_progress' — derive it here.
+            state = status.get('state', '')
+            self._mission_in_progress = state in ('executing', 'paused', 'loading')
         except json.JSONDecodeError:
             pass
 
@@ -281,94 +355,65 @@ class MissionControlBridge(Node):
         if len(self._mission_items) == 0:
             return
 
-        payload = struct.pack('<H I', self._current_waypoint, int(time.time() * 1000))
-        self._send_mavlink_frame(self.MAVLINK_MSG_ID_MISSION_CURRENT, payload)
+        payload = mav.build_mission_current(
+            seq=self._current_waypoint,
+            total=len(self._mission_items),
+        )
+        self._send_mavlink_frame(mav.MAVLINK_MSG_ID_MISSION_CURRENT, payload)
+
+    # ===== Outbound message builders =====
 
     def _send_mission_count(self, count: int):
-        """Send MISSION_COUNT to QGC."""
-        payload = struct.pack('<H I', count, 0)
-        self._send_mavlink_frame(self.MAVLINK_MSG_ID_MISSION_COUNT, payload)
+        payload = mav.build_mission_count(
+            count, target_system=self._gcs_system_id, target_component=self._gcs_component_id)
+        self._send_mavlink_frame(mav.MAVLINK_MSG_ID_MISSION_COUNT, payload)
 
     def _send_mission_ack(self, result: int):
-        """Send MISSION_ACK to QGC."""
-        payload = struct.pack('<H I', result, 0)
-        self._send_mavlink_frame(self.MAVLINK_MSG_ID_MISSION_ACK, payload)
+        payload = mav.build_mission_ack(
+            result, target_system=self._gcs_system_id, target_component=self._gcs_component_id)
+        self._send_mavlink_frame(mav.MAVLINK_MSG_ID_MISSION_ACK, payload)
 
-    def _send_mission_item(self, seq: int, item: Dict):
-        """Send a waypoint to QGC."""
+    def _send_mission_request_int(self, seq: int):
+        payload = mav.build_mission_request_int(
+            seq, target_system=self._gcs_system_id, target_component=self._gcs_component_id)
+        self._send_mavlink_frame(mav.MAVLINK_MSG_ID_MISSION_REQUEST_INT, payload)
+
+    def _send_mission_item_int(self, seq: int, item: Dict):
+        """Send a waypoint to QGC as MISSION_ITEM_INT (scaled-int lat/lon)."""
         frame = item.get('frame', 3)  # MAV_FRAME_GLOBAL_RELATIVE_ALT
-        command = item.get('command', 16)  # NAV_WAYPOINT
+        command = item.get('command', MAVMissionType.NAV_WAYPOINT)
         current = item.get('current', 0)
         autocontinue = item.get('autocontinue', 1)
-        params = item.get('params', [0, 0, 0, 0])
+        params = item.get('params', [0.0, 0.0, 0.0, 0.0])
         pos = item.get('position', {})
 
         lat = int(pos.get('latitude', 0) * 1e7)
         lon = int(pos.get('longitude', 0) * 1e7)
         alt = float(pos.get('altitude', 0))
 
-        payload = struct.pack('<H B H B B f f f f i i f',
-            seq, frame, command, current, autocontinue,
-            params[0], params[1], params[2], params[3],
-            lat, lon, alt
+        payload = mav.build_mission_item_int(
+            seq=seq, frame=frame, command=command, current=current,
+            autocontinue=autocontinue,
+            param1=params[0], param2=params[1], param3=params[2], param4=params[3],
+            x=lat, y=lon, z=alt,
+            target_system=self._gcs_system_id, target_component=self._gcs_component_id,
         )
-
-        self._send_mavlink_frame(self.MAVLINK_MSG_ID_MISSION_ITEM, payload)
+        self._send_mavlink_frame(mav.MAVLINK_MSG_ID_MISSION_ITEM_INT, payload)
 
     def _send_mavlink_frame(self, msg_id: int, payload: bytes):
-        """Send MAVLink frame to QGC."""
+        """Send a spec-compliant MAVLink 2.0 frame to QGC."""
         if self._socket is None:
             return
 
         seq = self._sequence % 256
         self._sequence += 1
 
-        stx = 0xFD
-        payload_len = len(payload)
-        incomp_flags = 0x00
-
-        frame_data = struct.pack('<BBBBBBB',
-            stx, payload_len, incomp_flags, msg_id & 0xFF,
-            self.system_id, self.component_id, seq
-        ) + payload
-
-        crc = self._compute_crc(frame_data[1:], msg_id)
-        frame = frame_data + struct.pack('<H', crc)
+        frame = mav.build_frame(msg_id, seq, payload, self.system_id, self.component_id)
 
         try:
-            self._socket.sendto(frame, ('localhost', 14550))
+            self._socket.sendto(frame, self._reply_addr)
         except OSError as e:
             self.get_logger().warn(f'Failed to send MAVLink frame: {e}')
-
-    @staticmethod
-    def _compute_crc(data: bytes, msg_id: int) -> int:
-        """Compute MAVLink CRC16-CCITT."""
-        CRC_INIT = 0xFFFF
-        CRC_EXTRA_MAP = {
-            39: 191,  # MISSION_ITEM
-            40: 230,  # MISSION_REQUEST
-            42: 4,    # MISSION_CURRENT
-            43: 33,   # MISSION_REQUEST_LIST
-            44: 142,  # MISSION_COUNT
-            47: 153,  # MISSION_ACK
-            61: 16,   # MISSION_ITEM_REACHED
-        }
-
-        crc_extra = CRC_EXTRA_MAP.get(msg_id, 0)
-        crc = CRC_INIT
-
-        for byte in data:
-            tmp = byte ^ (crc & 0xFF)
-            tmp = (tmp ^ (tmp << 4)) & 0xFF
-            crc = (crc >> 8) ^ (tmp << 8) ^ (tmp << 3) ^ (tmp >> 4)
-            crc &= 0xFFFF
-
-        tmp = crc_extra ^ (crc & 0xFF)
-        tmp = (tmp ^ (tmp << 4)) & 0xFF
-        crc = (crc >> 8) ^ (tmp << 8) ^ (tmp << 3) ^ (tmp >> 4)
-        crc &= 0xFFFF
-
-        return crc
 
 
 def main(args=None):

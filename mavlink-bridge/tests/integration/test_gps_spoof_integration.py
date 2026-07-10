@@ -1,398 +1,209 @@
 #!/usr/bin/env python3
 """
-Integration Test Suite: GPS Spoofing Detector → MAVLink Bridge → QGC
+Integration Test Suite: GPS Spoofing Detector -> MAVLink Bridge -> QGC (real UDP)
 
-Tests the full end-to-end pipeline:
-  1. gps_spoof_detector_node publishes JSON alerts to /gps_spoof_alert
-  2. gps_spoof_mavlink_bridge subscribes and receives alerts
-  3. Bridge converts to MAVLink STATUSTEXT
-  4. MAVLink packets are sent via UDP socket
-  5. Packets are valid and parseable by QGC
+Constructs the REAL GPSSpoofMAVLinkBridge via its actual __init__ (a real UDP
+socket connected to a real listening socket standing in for QGC), then
+drives its real _cb_gps_spoof_alert callback and verifies genuine bytes
+arrive at the far end and parse as valid MAVLink 2.0 STATUSTEXT.
 
-Prerequisites:
-  - ROS 2 Jazzy installed
-  - Both nodes built and in ROS path
-  - UDP socket can bind to localhost:14550
-
-Running:
-  python3 -m pytest test_integration.py -v
-  OR
-  ros2 run mavlink-bridge test_integration.py
+A previous version of this file set up real rclpy Node subclasses directly
+(no stubbing), which meant it could only be collected inside a real ROS 2
+environment with rclpy installed -- and even then, its assertions never
+actually instantiated GPSSpoofMAVLinkBridge. test_bridge_receives_alert only
+checked that a synthetic publisher's call counter incremented, with the
+comment "Bridge should have received it (in real environment)" -- i.e. it
+never checked the bridge at all. This version stubs rclpy (so it can run
+anywhere) and drives the real bridge class end-to-end over a real socket.
 """
 
 import json
 import socket
-import struct
-import time
-import threading
-from typing import List, Optional
+import sys
+from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
-import rclpy
-from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
-from std_msgs.msg import String
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
-class AlertPublisherNode(Node):
-    """Test fixture: publishes synthetic GPS spoofing alerts."""
+_PARAM_VALUES = {
+    'system_id': 1,
+    'component_id': 200,
+    'mavlink_host': 'localhost',
+    'mavlink_port': 0,
+}
 
+
+def _install_ros_stubs():
+    if 'gps_spoof_mavlink_bridge' in sys.modules:
+        return
+
+    class _DummyString:
+        def __init__(self):
+            self.data = ''
+
+    class _DummyNode:
+        def __init__(self, name):
+            self._logger = MagicMock()
+
+        def declare_parameter(self, name, default=None):
+            pass
+
+        def get_parameter(self, name):
+            m = MagicMock()
+            m.value = _PARAM_VALUES.get(name)
+            return m
+
+        def create_subscription(self, msg_type, topic, callback, qos):
+            return MagicMock()
+
+        def get_logger(self):
+            return self._logger
+
+        def destroy_node(self):
+            pass
+
+    rclpy_mock = MagicMock()
+    rclpy_mock.node.Node = _DummyNode
+    sys.modules['rclpy'] = rclpy_mock
+    sys.modules['rclpy.node'] = rclpy_mock.node
+    sys.modules['rclpy.qos'] = MagicMock()
+
+    std_msgs_mock = MagicMock()
+    std_msgs_mock.String = _DummyString
+    sys.modules['std_msgs'] = MagicMock()
+    sys.modules['std_msgs.msg'] = std_msgs_mock
+
+
+_install_ros_stubs()
+
+import mavlink_v2 as mav
+from gps_spoof_mavlink_bridge import GPSSpoofMAVLinkBridge, MAVSeverity
+
+
+class _DummyString:
     def __init__(self):
-        super().__init__('test_alert_publisher')
-        qos = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1
-        )
-        self.pub = self.create_publisher(String, '/gps_spoof_alert', qos)
-        self.published_count = 0
-
-    def publish_alert(self, level: str, strategy: str, state: str, detail: dict):
-        """Publish a GPS spoofing alert."""
-        alert = {
-            'alert_id': self.published_count + 1,
-            'level': level,
-            'strategy': strategy,
-            'state': state,
-            'detail': detail,
-            'timestamp_us': int(time.time() * 1_000_000),
-        }
-        msg = String()
-        msg.data = json.dumps(alert)
-        self.pub.publish(msg)
-        self.published_count += 1
-        time.sleep(0.1)  # Allow bridge time to process
+        self.data = ''
 
 
-class UDPCapture(Node):
-    """Test fixture: captures UDP packets sent to port 14550."""
-
-    def __init__(self):
-        super().__init__('test_udp_capture')
-        self.captured_packets: List[bytes] = []
-        self.socket: Optional[socket.socket] = None
-        self.running = False
-        self.thread: Optional[threading.Thread] = None
-
-    def start(self):
-        """Start capturing UDP packets."""
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.socket.bind(('localhost', 14550))
-        self.socket.settimeout(0.5)
-
-        self.running = True
-        self.thread = threading.Thread(target=self._capture_loop, daemon=True)
-        self.thread.start()
-        self.get_logger().info('UDP capture started on localhost:14550')
-
-    def stop(self):
-        """Stop capturing."""
-        self.running = False
-        if self.thread:
-            self.thread.join(timeout=1.0)
-        if self.socket:
-            self.socket.close()
-
-    def _capture_loop(self):
-        """Capture loop running in background thread."""
-        while self.running:
-            try:
-                data, addr = self.socket.recvfrom(4096)
-                self.captured_packets.append(data)
-            except socket.timeout:
-                pass
-            except OSError:
-                break
-
-    def get_packets(self) -> List[bytes]:
-        """Get all captured packets."""
-        return self.captured_packets.copy()
-
-    def clear(self):
-        """Clear captured packets."""
-        self.captured_packets.clear()
+@pytest.fixture
+def qgc_listener():
+    """A real UDP socket standing in for QGroundControl's listening endpoint."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(('localhost', 0))
+    sock.settimeout(2.0)
+    yield sock
+    sock.close()
 
 
-class MAVLinkFrameParser:
-    """Parse and validate MAVLink 2.0 frames."""
-
-    @staticmethod
-    def parse_statustext(frame: bytes) -> Optional[dict]:
-        """
-        Parse a MAVLink STATUSTEXT frame.
-
-        Returns dict with:
-          - stx: Start byte (should be 0xFD)
-          - payload_len: Payload length
-          - msg_id: Message ID (should be 253 for STATUSTEXT)
-          - system_id: System ID
-          - component_id: Component ID
-          - sequence: Sequence number
-          - severity: Alert severity (0=INFO, 4=WARNING, 5=CRITICAL)
-          - text: Status text (50 chars max)
-          - crc: CRC16 checksum
-          - valid: Boolean indicating frame validity
-        """
-        if len(frame) < 10:
-            return None
-
-        try:
-            stx = frame[0]
-            if stx != 0xFD:
-                return None
-
-            payload_len = frame[1]
-            msg_id = frame[3]
-            system_id = frame[4]
-            component_id = frame[5]
-            sequence = frame[6]
-
-            # Extract payload (after 7-byte header)
-            payload = frame[7:7+payload_len]
-
-            # Extract CRC (last 2 bytes, little-endian)
-            crc_from_frame = struct.unpack('<H', frame[-2:])[0]
-
-            # Parse STATUSTEXT payload
-            severity = payload[0] if len(payload) > 0 else None
-            text_bytes = payload[1:51] if len(payload) > 1 else b''
-            text = text_bytes.rstrip(b'\x00').decode('ascii', errors='ignore')
-
-            # Verify CRC (basic check - frame boundary)
-            crc_valid = len(frame) == 7 + payload_len + 2
-
-            return {
-                'stx': stx,
-                'payload_len': payload_len,
-                'msg_id': msg_id,
-                'system_id': system_id,
-                'component_id': component_id,
-                'sequence': sequence,
-                'severity': severity,
-                'text': text,
-                'crc': crc_from_frame,
-                'valid': (stx == 0xFD and msg_id == 253 and crc_valid),
-            }
-        except Exception:
-            return None
+@pytest.fixture
+def bridge(qgc_listener):
+    """A real GPSSpoofMAVLinkBridge, connected to the qgc_listener socket."""
+    _PARAM_VALUES['mavlink_port'] = qgc_listener.getsockname()[1]
+    b = GPSSpoofMAVLinkBridge()
+    yield b
+    if b._socket is not None:
+        b._socket.close()
 
 
-# ===== Integration Tests =====
+def _alert_msg(alert_id=1, level='WARNING', strategy='HEADING', state='SUSPICIOUS', detail=None):
+    m = _DummyString()
+    m.data = json.dumps({
+        'alert_id': alert_id, 'level': level, 'strategy': strategy,
+        'state': state, 'detail': detail or {},
+    })
+    return m
 
-class TestGPSSpoofBridgeIntegration:
-    """Integration tests for GPS spoofing detector → MAVLink bridge pipeline."""
 
-    @pytest.fixture(autouse=True)
-    def setup_ros(self):
-        """Set up ROS 2 context for each test."""
-        if not rclpy.ok():
-            rclpy.init()
-        yield
-        # Cleanup after test
+class TestRealBridgeConstruction:
 
-    def test_detector_publishes_alert(self):
-        """Test that detector node can publish alerts."""
-        publisher = AlertPublisherNode()
+    def test_bridge_connects_real_socket(self, bridge):
+        assert bridge._socket is not None
 
-        # Publish test alert
-        publisher.publish_alert(
-            level='INFO',
-            strategy='HEADING',
-            state='NOMINAL',
-            detail={'description': 'Test alert'}
-        )
+    def test_bridge_uses_configured_system_and_component_id(self, bridge):
+        assert bridge.system_id == 1
+        assert bridge.component_id == 200
 
-        assert publisher.published_count == 1
-        publisher.destroy_node()
 
-    def test_bridge_receives_alert(self):
-        """Test that bridge receives alerts from detector."""
-        publisher = AlertPublisherNode()
-        rclpy.spin_once(publisher, timeout_sec=0.1)
+class TestRealAlertToUdpPipeline:
+    """JSON alert -> real _cb_gps_spoof_alert -> real UDP bytes -> real
+    parser at the far end. This is the pipeline the previous version of this
+    file claimed to test but never actually drove."""
 
-        # Publish alert
-        publisher.publish_alert(
-            level='WARNING',
-            strategy='HEADING',
-            state='SUSPICIOUS',
-            detail={
-                'ekf2_heading_deg': 45.0,
-                'mag_heading_deg': 60.5,
-                'diff_deg': 15.5,
-                'description': 'EKF2 and magnetometer diverging',
-            }
-        )
+    def test_critical_alert_arrives_as_valid_statustext(self, bridge, qgc_listener):
+        bridge._cb_gps_spoof_alert(_alert_msg(
+            level='CRITICAL', strategy='HEADING', state='SPOOFING_DETECTED',
+            detail={'description': 'EKF2 heading diverging'}))
 
-        # Bridge should have received it (in real environment)
-        assert publisher.published_count == 1
-        publisher.destroy_node()
-
-    def test_udp_socket_binding(self):
-        """Test that UDP socket can bind to port 14550."""
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind(('localhost', 14550))
-            sock.close()
-            assert True
-        except OSError as e:
-            pytest.skip(f"Port 14550 unavailable: {e}")
-
-    def test_mavlink_frame_parsing(self):
-        """Test parsing of MAVLink STATUSTEXT frames."""
-        # Construct a minimal valid MAVLink frame
-        stx = 0xFD
-        payload_len = 54
-        incomp_flags = 0x00
-        msg_id = 253  # STATUSTEXT
-        sys_id = 1
-        comp_id = 200
-        seq = 0
-
-        severity = 4  # WARNING
-        text = "GPS HEADING DIVERGENCE"
-        text_bytes = text.encode('ascii').ljust(50, b'\x00')[:50]
-        msg_id_field = struct.pack('<H', 0)
-        chunk_seq = struct.pack('B', 0)
-
-        payload = struct.pack('B', severity) + text_bytes + msg_id_field + chunk_seq
-        crc = 0x1234  # Dummy CRC for test
-
-        frame = struct.pack(
-            '<BBBBBBB',
-            stx, payload_len, incomp_flags, msg_id, sys_id, comp_id, seq
-        ) + payload + struct.pack('<H', crc)
-
-        parsed = MAVLinkFrameParser.parse_statustext(frame)
+        data, _ = qgc_listener.recvfrom(1024)
+        parsed = mav.parse_frame(data)
 
         assert parsed is not None
-        assert parsed['stx'] == 0xFD
-        assert parsed['msg_id'] == 253
-        assert parsed['system_id'] == 1
-        assert parsed['component_id'] == 200
-        assert parsed['severity'] == 4
-        assert "GPS HEADING DIVERGENCE" in parsed['text']
+        assert parsed.valid
+        assert parsed.msg_id == mav.MAVLINK_MSG_ID_STATUSTEXT
+        assert parsed.payload[0] == int(MAVSeverity.CRITICAL)
 
-    def test_alert_level_to_severity_mapping(self):
-        """Test that alert levels map to MAVLink severity values."""
-        mappings = {
-            'INFO': 0,
-            'WARNING': 4,
-            'CRITICAL': 5,
-        }
+    def test_warning_alert_severity_and_text(self, bridge, qgc_listener):
+        bridge._cb_gps_spoof_alert(_alert_msg(
+            level='WARNING', strategy='ALTITUDE', state='SUSPICIOUS',
+            detail={'description': 'GPS/baro altitude mismatch'}))
 
-        for alert_level, expected_severity in mappings.items():
-            # In real test, bridge would convert and send
-            # For now, verify mapping is documented
-            assert expected_severity in [0, 4, 5]
+        data, _ = qgc_listener.recvfrom(1024)
+        parsed = mav.parse_frame(data)
 
-    def test_json_alert_format_compatibility(self):
-        """Test that detector JSON format is compatible with bridge."""
-        alert_json = {
-            'alert_id': 1,
-            'level': 'CRITICAL',
-            'strategy': 'ALTITUDE',
-            'state': 'SPOOFING_DETECTED',
-            'detail': {
-                'gps_alt_m': 10.5,
-                'baro_alt_m': 100.2,
-                'discrepancy_m': 89.7,
-                'description': 'GPS altitude spoofing detected',
-            },
-            'timestamp_us': 1234567890,
-        }
+        assert parsed.payload[0] == int(MAVSeverity.WARNING)
+        text = parsed.payload[1:51].rstrip(b'\x00').decode('ascii', errors='ignore')
+        assert 'ALTITUDE' in text
 
-        # Verify all required fields are present
-        assert 'alert_id' in alert_json
-        assert 'level' in alert_json
-        assert 'strategy' in alert_json
-        assert 'state' in alert_json
-        assert 'detail' in alert_json
-        assert 'timestamp_us' in alert_json
+    def test_multiple_alerts_arrive_in_order(self, bridge, qgc_listener):
+        alerts = [
+            ('INFO', 'NOMINAL'),
+            ('WARNING', 'SUSPICIOUS'),
+            ('CRITICAL', 'SPOOFING_DETECTED'),
+        ]
+        for level, state in alerts:
+            bridge._cb_gps_spoof_alert(_alert_msg(level=level, strategy='HEADING', state=state))
 
-        # Verify level is valid
-        assert alert_json['level'] in ['INFO', 'WARNING', 'CRITICAL']
+        severities = []
+        for _ in alerts:
+            data, _ = qgc_listener.recvfrom(1024)
+            severities.append(mav.parse_frame(data).payload[0])
 
-        # Verify strategy is valid
-        assert alert_json['strategy'] in ['HEADING', 'ALTITUDE', 'PX4_INTERNAL']
+        assert severities == [int(MAVSeverity.INFO), int(MAVSeverity.WARNING), int(MAVSeverity.CRITICAL)]
 
-        # Verify state is valid
-        assert alert_json['state'] in ['NOMINAL', 'SUSPICIOUS', 'SPOOFING_DETECTED']
+    def test_malformed_json_sends_nothing_and_does_not_raise(self, bridge, qgc_listener):
+        bad_msg = _DummyString()
+        bad_msg.data = '{"invalid": json}'
+        bridge._cb_gps_spoof_alert(bad_msg)  # must not raise
 
-    def test_sequence_numbering_across_alerts(self):
-        """Test that sequence numbers increment across multiple alerts."""
-        sequences = []
-        for i in range(5):
-            seq = i % 256
-            sequences.append(seq)
+        with pytest.raises(socket.timeout):
+            qgc_listener.recvfrom(1024)
 
-        # Verify sequences are monotonic
-        assert sequences == [0, 1, 2, 3, 4]
+    def test_long_description_truncated_over_the_wire(self, bridge, qgc_listener):
+        bridge._cb_gps_spoof_alert(_alert_msg(
+            level='WARNING', strategy='HEADING', state='SUSPICIOUS',
+            detail={'description': 'X' * 200}))
 
-        # Verify wrap-around at 256
-        sequences_wrap = [i % 256 for i in range(255, 260)]
-        assert sequences_wrap == [255, 0, 1, 2, 3]
+        data, _ = qgc_listener.recvfrom(1024)
+        parsed = mav.parse_frame(data)
+        text = parsed.payload[1:51].rstrip(b'\x00')
+        assert len(text) <= 50
 
-    def test_message_truncation_in_frame(self):
-        """Test that long messages are correctly truncated in MAVLink frames."""
-        long_text = "A" * 100  # 100 chars, should be truncated to 50
-
-        # Pad to 50 chars as bridge does
-        text_padded = long_text[:50].ljust(50, '\x00')
-
-        assert len(text_padded) == 50
-        assert text_padded.startswith('A' * 50)
-
-    def test_error_handling_malformed_json(self):
-        """Test bridge gracefully handles malformed JSON alerts."""
-        # Bridge should log error and continue
-        malformed_json = '{"invalid": json}'
-        # In real test, bridge would handle this gracefully
-        try:
-            json.loads(malformed_json)
-            assert False, "Should have raised JSONDecodeError"
-        except json.JSONDecodeError:
-            pass  # Expected
-
-    def test_high_frequency_alert_stream(self):
-        """Test bridge handles rapid alert stream (stress test)."""
-        publisher = AlertPublisherNode()
-
-        # Publish 10 alerts rapidly
+    def test_high_frequency_alert_stream_all_arrive_valid(self, bridge, qgc_listener):
         for i in range(10):
-            publisher.publish_alert(
-                level=['INFO', 'WARNING', 'CRITICAL'][i % 3],
-                strategy='HEADING',
-                state='NOMINAL',
-                detail={'count': i}
-            )
+            bridge._cb_gps_spoof_alert(_alert_msg(
+                level=['INFO', 'WARNING', 'CRITICAL'][i % 3], strategy='HEADING',
+                state='NOMINAL', detail={'count': i}))
 
-        assert publisher.published_count == 10
-        publisher.destroy_node()
-
-
-# ===== End-to-End Integration Test =====
-
-def test_full_pipeline_integration():
-    """
-    Full integration test: detector → bridge → UDP → parser.
-
-    This test requires:
-      - ROS 2 running
-      - gps_spoof_detector_node available
-      - gps_spoof_mavlink_bridge available
-      - Port 14550 available
-
-    Run with:
-      ros2 launch mavlink-bridge test_full_integration.launch.py
-    """
-    pytest.skip(
-        "Full pipeline requires ROS 2 environment with nodes running. "
-        "Run manually: see docs/GPS_SPOOFING_QGC_INTEGRATION.md"
-    )
+        received = 0
+        for _ in range(10):
+            data, _ = qgc_listener.recvfrom(1024)
+            assert mav.parse_frame(data).valid
+            received += 1
+        assert received == 10
 
 
 if __name__ == '__main__':
-    pytest.main([__file__, '-v', '--tb=short'])
+    pytest.main([__file__, '-v'])

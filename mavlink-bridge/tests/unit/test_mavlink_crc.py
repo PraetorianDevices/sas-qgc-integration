@@ -1,234 +1,237 @@
 #!/usr/bin/env python3
 """
-Unit Test: MAVLink Frame Generation
+Unit Test: GPS Spoofing Bridge MAVLink Frame Generation (real module)
 
-Tests the MAVLink 2.0 frame generation logic without requiring ROS 2 runtime.
-Verifies:
-  - STATUSTEXT payload formatting
-  - MAVLink 2.0 frame structure
-  - CRC16-CCITT computation
-  - Alert level mapping
+Tests the real GPSSpoofMAVLinkBridge's STATUSTEXT frame generation, via
+mavlink_v2's verified codec. A previous version of this file called
+bridge._build_statustext_payload/_build_mavlink_frame/_compute_mavlink_crc --
+those methods were removed when gps_spoof_mavlink_bridge.py was migrated to
+mavlink_v2.py, so that version would now raise AttributeError outright. Its
+assertions were also written against the old 7-byte frame header (e.g.
+`frame[3] == msg_id`), which never matched real MAVLink 2.0 in the first
+place.
+
+This file also absorbs the previously-separate test_mavlink_frame_generation.py,
+which reimplemented the identical (broken) frame logic in a standalone
+MAVLinkFrameBuilder class and never imported real code at all -- keeping two
+parallel test files for the same functionality, one fake and one real, was
+worse than consolidating into one that's real.
 """
 
-import struct
 import json
-from gps_spoof_mavlink_bridge import GPSSpoofMAVLinkBridge
+import sys
+import types
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
-def test_mavlink_frame_structure():
-    """Test that MAVLink frames are correctly formatted."""
+def _install_stubs():
+    if 'gps_spoof_mavlink_bridge' in sys.modules:
+        return
+    rclpy_mock = MagicMock()
+    rclpy_mock.node.Node = object
+    sys.modules['rclpy'] = rclpy_mock
+    sys.modules['rclpy.node'] = rclpy_mock.node
+    sys.modules['rclpy.qos'] = MagicMock()
+    sys.modules['std_msgs'] = MagicMock()
+    sys.modules['std_msgs.msg'] = MagicMock()
+
+
+_install_stubs()
+
+import mavlink_v2 as mav
+from gps_spoof_mavlink_bridge import GPSSpoofMAVLinkBridge, MAVSeverity
+
+
+class _DummyString:
+    def __init__(self):
+        self.data = ''
+
+
+def _make_bridge(system_id=1, component_id=200):
     bridge = GPSSpoofMAVLinkBridge.__new__(GPSSpoofMAVLinkBridge)
-    bridge.system_id = 1
-    bridge.component_id = 200
+    bridge.system_id = system_id
+    bridge.component_id = component_id
     bridge._sequence = 0
-
-    # Build a test frame
-    text = "GPS SPOOF DETECTED: heading divergence"
-    severity = 5  # CRITICAL
-    payload = bridge._build_statustext_payload(text, severity)
-    frame = bridge._build_mavlink_frame(
-        msg_id=253,  # STATUSTEXT
-        seq=0,
-        payload=payload
-    )
-
-    print("=" * 70)
-    print("TEST 1: MAVLink Frame Structure")
-    print("=" * 70)
-    print(f"Text:          {text}")
-    print(f"Severity:      {severity} (CRITICAL)")
-    print(f"Frame length:  {len(frame)} bytes")
-    print(f"Frame (hex):   {frame.hex()[:60]}...")
-
-    # Verify frame structure
-    assert frame[0] == 0xFD, f"STX should be 0xFD, got {hex(frame[0])}"
-    assert frame[1] <= 255, f"Payload length should be ≤255, got {frame[1]}"
-    assert frame[3] == 253, f"Message ID should be 253 (STATUSTEXT), got {frame[3]}"
-    assert frame[4] == 1, f"System ID should be 1, got {frame[4]}"
-    assert frame[5] == 200, f"Component ID should be 200, got {frame[5]}"
-    assert frame[6] == 0, f"Sequence should be 0, got {frame[6]}"
-
-    print("✓ Frame structure validated")
-    print()
+    bridge.get_logger = lambda: MagicMock()
+    return bridge
 
 
-def test_crc_computation():
-    """Test CRC16-CCITT computation matches expected values."""
-    bridge = GPSSpoofMAVLinkBridge.__new__(GPSSpoofMAVLinkBridge)
-    bridge.system_id = 1
-    bridge.component_id = 200
-
-    text = "Test message"
-    severity = 4  # WARNING
-    payload = bridge._build_statustext_payload(text, severity)
-    frame = bridge._build_mavlink_frame(msg_id=253, seq=0, payload=payload)
-
-    # Extract CRC from frame (last 2 bytes, little-endian)
-    crc_from_frame = struct.unpack('<H', frame[-2:])[0]
-
-    # Recompute CRC
-    crc_recomputed = bridge._compute_mavlink_crc(frame[1:-2], 253)
-
-    print("=" * 70)
-    print("TEST 2: CRC16-CCITT Computation")
-    print("=" * 70)
-    print(f"CRC from frame:   0x{crc_from_frame:04x}")
-    print(f"CRC recomputed:   0x{crc_recomputed:04x}")
-    print(f"Match: {'✓ YES' if crc_from_frame == crc_recomputed else '✗ NO'}")
-
-    assert crc_from_frame == crc_recomputed, "CRC mismatch!"
-    print()
+def _capture_socket(bridge):
+    sent = []
+    bridge._socket = types.SimpleNamespace(send=lambda f: sent.append(f))
+    return sent
 
 
-def test_statustext_payload():
-    """Test STATUSTEXT payload formatting."""
-    bridge = GPSSpoofMAVLinkBridge.__new__(GPSSpoofMAVLinkBridge)
-
-    text = "GPS altitude spoofed"
-    severity = 5  # CRITICAL
-    payload = bridge._build_statustext_payload(text, severity)
-
-    print("=" * 70)
-    print("TEST 3: STATUSTEXT Payload Formatting")
-    print("=" * 70)
-    print(f"Input text:       '{text}'")
-    print(f"Payload length:   {len(payload)} bytes")
-    print(f"Expected length:  53 bytes (1 severity + 50 text + 2 id)")
-
-    assert len(payload) == 53, f"Payload should be 53 bytes, got {len(payload)}"
-
-    # Verify severity byte
-    severity_from_payload = payload[0]
-    print(f"Severity byte:    {severity_from_payload} (expected {severity})")
-    assert severity_from_payload == severity, "Severity mismatch!"
-
-    # Verify text is padded correctly
-    text_from_payload = payload[1:51].rstrip(b'\x00').decode('ascii', errors='ignore')
-    print(f"Text from payload: '{text_from_payload}'")
-    assert text_from_payload == text, "Text mismatch!"
-
-    print("✓ STATUSTEXT payload validated")
-    print()
+def _alert_msg(alert_id=1, level='WARNING', strategy='HEADING', state='SUSPICIOUS', detail=None):
+    m = _DummyString()
+    m.data = json.dumps({
+        'alert_id': alert_id, 'level': level, 'strategy': strategy,
+        'state': state, 'detail': detail or {},
+    })
+    return m
 
 
-def test_alert_level_mapping():
-    """Test alert level to MAVLink severity mapping."""
-    print("=" * 70)
-    print("TEST 4: Alert Level Mapping")
-    print("=" * 70)
+class TestStatustextFrameStructure:
+    """Real GPSSpoofMAVLinkBridge._send_statustext output, validated via the
+    real mavlink_v2 parser -- not byte-offset assumptions about a 7-byte
+    header."""
 
-    mappings = {
-        'INFO': 0,
-        'WARNING': 4,
-        'CRITICAL': 5,
-    }
+    def test_frame_passes_crc_validation(self):
+        bridge = _make_bridge()
+        sent = _capture_socket(bridge)
 
-    for alert_level, expected_mav_severity in mappings.items():
-        print(f"{alert_level:10} → MAV_SEVERITY {expected_mav_severity}")
+        bridge._send_statustext("GPS SPOOF DETECTED: heading divergence", int(MAVSeverity.CRITICAL))
 
-    print("✓ Mapping table verified")
-    print()
+        assert len(sent) == 1
+        parsed = mav.parse_frame(sent[0])
+        assert parsed is not None
+        assert parsed.valid
+
+    def test_frame_identifies_as_statustext(self):
+        bridge = _make_bridge()
+        sent = _capture_socket(bridge)
+        bridge._send_statustext("Test message", int(MAVSeverity.WARNING))
+
+        parsed = mav.parse_frame(sent[0])
+        assert parsed.msg_id == mav.MAVLINK_MSG_ID_STATUSTEXT
+
+    def test_frame_carries_configured_system_and_component_id(self):
+        bridge = _make_bridge(system_id=1, component_id=200)
+        sent = _capture_socket(bridge)
+        bridge._send_statustext("Test message", int(MAVSeverity.WARNING))
+
+        parsed = mav.parse_frame(sent[0])
+        assert parsed.system_id == 1
+        assert parsed.component_id == 200
+
+    def test_statustext_payload_roundtrips_severity_and_text(self):
+        bridge = _make_bridge()
+        sent = _capture_socket(bridge)
+        bridge._send_statustext("GPS altitude spoofed", int(MAVSeverity.CRITICAL))
+
+        parsed = mav.parse_frame(sent[0])
+        # severity(u8) + text(char[50], truncated) -- decode directly, same
+        # layout mavlink_v2.build_statustext produces.
+        severity = parsed.payload[0]
+        text = parsed.payload[1:51].rstrip(b'\x00').decode('ascii', errors='ignore')
+        assert severity == int(MAVSeverity.CRITICAL)
+        assert text == "GPS altitude spoofed"
+
+    def test_long_message_truncated_to_50_chars(self):
+        bridge = _make_bridge()
+        sent = _capture_socket(bridge)
+        long_text = "A" * 100
+        bridge._send_statustext(long_text, int(MAVSeverity.WARNING))
+
+        parsed = mav.parse_frame(sent[0])
+        text = parsed.payload[1:51].rstrip(b'\x00').decode('ascii', errors='ignore')
+        assert len(text) == 50
+        assert text == "A" * 50
+
+    def test_sequence_increments_across_calls(self):
+        bridge = _make_bridge()
+        sent = _capture_socket(bridge)
+        for _ in range(5):
+            bridge._send_statustext("test", int(MAVSeverity.INFO))
+
+        sequences = [mav.parse_frame(f).sequence for f in sent]
+        assert sequences == [0, 1, 2, 3, 4]
+
+    def test_sequence_wraps_at_256(self):
+        bridge = _make_bridge()
+        sent = _capture_socket(bridge)
+        for _ in range(260):
+            bridge._send_statustext("test", int(MAVSeverity.INFO))
+
+        sequences = [mav.parse_frame(f).sequence for f in sent]
+        assert sequences[255] == 255
+        assert sequences[256] == 0
+        assert sequences[259] == 3
+
+    def test_no_socket_does_not_raise(self):
+        bridge = _make_bridge()
+        bridge._socket = None
+        bridge._send_statustext("test", int(MAVSeverity.WARNING))  # must not raise
 
 
-def test_truncation():
-    """Test that long messages are truncated to 50 chars."""
-    bridge = GPSSpoofMAVLinkBridge.__new__(GPSSpoofMAVLinkBridge)
+class TestGpsSpoofAlertPipelineReal:
+    """End-to-end: JSON alert in -> real MAVLink STATUSTEXT frame out, via
+    the real _cb_gps_spoof_alert callback."""
 
-    long_text = "This is a very long message that exceeds the 50-character limit for MAVLink STATUSTEXT messages"
-    payload = bridge._build_statustext_payload(long_text, 4)
+    def test_spoofing_detected_maps_to_critical_severity(self):
+        bridge = _make_bridge()
+        sent = _capture_socket(bridge)
 
-    text_from_payload = payload[1:51].rstrip(b'\x00').decode('ascii', errors='ignore')
+        bridge._cb_gps_spoof_alert(_alert_msg(
+            level='CRITICAL', strategy='HEADING', state='SPOOFING_DETECTED',
+            detail={'description': 'EKF2 heading diverging'}))
 
-    print("=" * 70)
-    print("TEST 5: Message Truncation")
-    print("=" * 70)
-    print(f"Input length:     {len(long_text)} chars")
-    print(f"Output length:    {len(text_from_payload)} chars")
-    print(f"Input text:       {long_text[:50]}...")
-    print(f"Output text:      {text_from_payload}")
+        parsed = mav.parse_frame(sent[0])
+        assert parsed.payload[0] == int(MAVSeverity.CRITICAL)
 
-    assert len(text_from_payload) <= 50, "Truncation failed!"
-    print("✓ Truncation validated (max 50 chars)")
-    print()
+    def test_suspicious_maps_to_warning_severity(self):
+        bridge = _make_bridge()
+        sent = _capture_socket(bridge)
 
+        bridge._cb_gps_spoof_alert(_alert_msg(
+            level='WARNING', strategy='ALTITUDE', state='SUSPICIOUS',
+            detail={'description': 'GPS/baro altitude mismatch'}))
 
-def test_json_alert_parsing():
-    """Test parsing of GPS spoofing alert JSON."""
-    print("=" * 70)
-    print("TEST 6: GPS Spoofing Alert JSON Parsing")
-    print("=" * 70)
+        parsed = mav.parse_frame(sent[0])
+        assert parsed.payload[0] == int(MAVSeverity.WARNING)
 
-    alert_json = {
-        "alert_id": 1,
-        "level": "CRITICAL",
-        "strategy": "HEADING",
-        "state": "SPOOFING_DETECTED",
-        "detail": {
-            "ekf2_heading_deg": 45.0,
-            "mag_heading_deg": 75.5,
-            "diff_deg": 30.5,
-            "description": "EKF2 heading diverging significantly from raw magnetometer."
-        },
-        "timestamp_us": 1234567890
-    }
+    def test_nominal_maps_to_info_severity(self):
+        bridge = _make_bridge()
+        sent = _capture_socket(bridge)
 
-    json_str = json.dumps(alert_json)
-    parsed = json.loads(json_str)
+        bridge._cb_gps_spoof_alert(_alert_msg(
+            level='INFO', strategy='HEADING', state='NOMINAL', detail={}))
 
-    print(f"Alert ID:      {parsed['alert_id']}")
-    print(f"Level:         {parsed['level']}")
-    print(f"Strategy:      {parsed['strategy']}")
-    print(f"State:         {parsed['state']}")
-    print(f"Description:   {parsed['detail']['description']}")
+        parsed = mav.parse_frame(sent[0])
+        assert parsed.payload[0] == int(MAVSeverity.INFO)
 
-    assert parsed['level'] == 'CRITICAL', "Level mismatch!"
-    assert parsed['strategy'] == 'HEADING', "Strategy mismatch!"
-    assert parsed['state'] == 'SPOOFING_DETECTED', "State mismatch!"
+    def test_malformed_json_does_not_raise(self):
+        bridge = _make_bridge()
+        _capture_socket(bridge)
+        bad_msg = _DummyString()
+        bad_msg.data = '{"invalid": json}'
+        bridge._cb_gps_spoof_alert(bad_msg)  # must not raise
 
-    print("✓ JSON parsing validated")
-    print()
+    def test_alert_text_includes_strategy_and_description(self):
+        bridge = _make_bridge()
+        sent = _capture_socket(bridge)
 
+        bridge._cb_gps_spoof_alert(_alert_msg(
+            level='CRITICAL', strategy='HEADING', state='SPOOFING_DETECTED',
+            detail={'description': 'diverging'}))
 
-def main():
-    """Run all tests."""
-    print("\n")
-    print("╔" + "=" * 68 + "╗")
-    print("║" + " " * 15 + "GPS Spoofing MAVLink Bridge — Unit Tests" + " " * 13 + "║")
-    print("╚" + "=" * 68 + "╝")
-    print()
+        parsed = mav.parse_frame(sent[0])
+        text = parsed.payload[1:51].rstrip(b'\x00').decode('ascii', errors='ignore')
+        assert 'HEADING' in text
+        assert 'SPOOF DETECTED' in text
 
-    tests = [
-        test_mavlink_frame_structure,
-        test_crc_computation,
-        test_statustext_payload,
-        test_alert_level_mapping,
-        test_truncation,
-        test_json_alert_parsing,
-    ]
+    def test_multiple_alerts_produce_valid_sequential_frames(self):
+        bridge = _make_bridge()
+        sent = _capture_socket(bridge)
 
-    passed = 0
-    failed = 0
+        alerts = [
+            ('INFO', 'HEADING', 'NOMINAL'),
+            ('WARNING', 'HEADING', 'SUSPICIOUS'),
+            ('CRITICAL', 'HEADING', 'SPOOFING_DETECTED'),
+            ('INFO', 'HEADING', 'NOMINAL'),
+        ]
+        for level, strategy, state in alerts:
+            bridge._cb_gps_spoof_alert(_alert_msg(level=level, strategy=strategy, state=state))
 
-    for test in tests:
-        try:
-            test()
-            passed += 1
-        except AssertionError as e:
-            print(f"✗ FAILED: {e}")
-            failed += 1
-            print()
-
-    print("=" * 70)
-    print(f"RESULTS: {passed} passed, {failed} failed")
-    print("=" * 70)
-
-    if failed == 0:
-        print("\n✓ All tests passed!")
-        return 0
-    else:
-        print(f"\n✗ {failed} test(s) failed")
-        return 1
+        assert len(sent) == 4
+        for frame in sent:
+            assert mav.parse_frame(frame).valid
 
 
 if __name__ == '__main__':
-    exit(main())
+    pytest.main([__file__, '-v'])

@@ -9,7 +9,6 @@ converts to MAVLink messages, and publishes via UDP to QGroundControl.
 Messages Published:
   - HEARTBEAT (MAV_TYPE_QUADROTOR)
   - GLOBAL_POSITION_INT (GPS position, heading, altitude)
-  - LOCAL_POSITION_NED (relative position, velocity)
   - ATTITUDE (roll, pitch, yaw, angular velocities)
   - SYS_STATUS (battery, CPU, sensor health)
   - BATTERY_STATUS (detailed battery telemetry)
@@ -22,9 +21,17 @@ Coordinate Frames:
 Hardware:
   Flight Controller: mRo Pixracer Pro (PX4)
   Companion Computer: Orin Nano Super
+
+All frame encoding goes through mavlink_v2.py, which is verified byte-for-byte
+against pymavlink. This bridge previously built a non-standard 7-byte frame
+header instead of the real 10-byte MAVLink 2.0 header, and its SYS_STATUS
+payload packed three 32-bit sensor-bitmask fields as 16-bit (wrong width,
+wrong total payload length). Its BATTERY_STATUS payload additionally had a
+bug where the real per-cell voltages argument was never used — a loop over
+`enumerate([0]*10)` meant every cell was always sent as 0V regardless of the
+vehicle's actual battery state.
 """
 
-import struct
 import socket
 import time
 import math
@@ -42,7 +49,8 @@ from px4_msgs.msg import (
     BatteryStatus,
     SensorGps,
 )
-from std_msgs.msg import String
+
+import mavlink_v2 as mav
 
 
 class MAVType(IntEnum):
@@ -76,14 +84,6 @@ class TelemetryMAVLinkBridge(Node):
 
     Converts PX4 sensor data to MAVLink messages and transmits via UDP.
     """
-
-    # MAVLink message IDs
-    MAVLINK_MSG_ID_HEARTBEAT = 0
-    MAVLINK_MSG_ID_GLOBAL_POSITION_INT = 33
-    MAVLINK_MSG_ID_LOCAL_POSITION_NED = 32
-    MAVLINK_MSG_ID_ATTITUDE = 30
-    MAVLINK_MSG_ID_SYS_STATUS = 1
-    MAVLINK_MSG_ID_BATTERY_STATUS = 147
 
     def __init__(self):
         super().__init__('telemetry_mavlink_bridge')
@@ -119,6 +119,14 @@ class TelemetryMAVLinkBridge(Node):
 
         # Sequence counter
         self._sequence = 0
+
+        # MAVLink's time_boot_ms is milliseconds since system boot (uint32), not
+        # a Unix timestamp -- time.time()*1000 is ~1.7e12 for any 2020s date,
+        # which overflows uint32 (max ~4.3e9) and previously crashed struct.pack
+        # on every telemetry publish once a GPS fix was present. Track our own
+        # monotonic reference instead so the value starts near 0 and only grows
+        # with node uptime.
+        self._boot_time = time.monotonic()
 
         # Telemetry cache
         self._local_pos: Optional[VehicleLocalPosition] = None
@@ -221,8 +229,8 @@ class TelemetryMAVLinkBridge(Node):
         else:
             mav_state = MAVState.STANDBY
 
-        payload = self._build_heartbeat(
-            type=MAVType.QUADROTOR,
+        payload = mav.build_heartbeat(
+            type_=MAVType.QUADROTOR,
             autopilot=4,  # MAV_AUTOPILOT_PX4
             base_mode=192 if self._vehicle_status.arming_state == 2 else 0,  # ARMED flag
             custom_mode=self._vehicle_status.nav_state,
@@ -230,7 +238,7 @@ class TelemetryMAVLinkBridge(Node):
             mavlink_version=3
         )
 
-        self._send_mavlink_frame(self.MAVLINK_MSG_ID_HEARTBEAT, payload)
+        self._send_mavlink_frame(mav.MAVLINK_MSG_ID_HEARTBEAT, payload)
 
     def _publish_telemetry(self):
         """Publish position/attitude telemetry at 10 Hz."""
@@ -239,8 +247,8 @@ class TelemetryMAVLinkBridge(Node):
 
         # Global Position
         if self._sensor_gps is not None and self._sensor_gps.fix_type >= 3:
-            payload = self._build_global_position_int(
-                time_boot_ms=int(time.time() * 1000),
+            payload = mav.build_global_position_int(
+                time_boot_ms=self._time_boot_ms(),
                 lat=int(self._sensor_gps.lat),
                 lon=int(self._sensor_gps.lon),
                 alt=int(self._sensor_gps.alt * 1000),
@@ -250,12 +258,12 @@ class TelemetryMAVLinkBridge(Node):
                 vz=int(self._local_pos.vz * 100),
                 hdg=int(self._local_pos.heading * 100),
             )
-            self._send_mavlink_frame(self.MAVLINK_MSG_ID_GLOBAL_POSITION_INT, payload)
+            self._send_mavlink_frame(mav.MAVLINK_MSG_ID_GLOBAL_POSITION_INT, payload)
 
         # Attitude
         roll, pitch, yaw = self._quaternion_to_euler(self._attitude.q)
-        payload = self._build_attitude(
-            time_boot_ms=int(time.time() * 1000),
+        payload = mav.build_attitude(
+            time_boot_ms=self._time_boot_ms(),
             roll=roll,
             pitch=pitch,
             yaw=yaw,
@@ -263,14 +271,18 @@ class TelemetryMAVLinkBridge(Node):
             pitchspeed=self._attitude.pitchspeed,
             yawspeed=self._attitude.yawspeed,
         )
-        self._send_mavlink_frame(self.MAVLINK_MSG_ID_ATTITUDE, payload)
+        self._send_mavlink_frame(mav.MAVLINK_MSG_ID_ATTITUDE, payload)
 
         # System Status
         if self._vehicle_status is not None:
-            payload = self._build_sys_status(
-                onboard_control_sensors_present=0xFFFF,
-                onboard_control_sensors_enabled=0xFFFF,
-                onboard_control_sensors_health=0xFFFF,
+            payload = mav.build_sys_status(
+                # All 32 bits reported present/enabled/healthy — the bridge has no
+                # per-sensor bit mapping, so this is a best-effort "all good" default
+                # (previously 0xFFFF, a 16-bit pattern, was packed into a field that
+                # was itself incorrectly only 16 bits wide; both are fixed here).
+                sensors_present=0xFFFFFFFF,
+                sensors_enabled=0xFFFFFFFF,
+                sensors_health=0xFFFFFFFF,
                 load=int(self._vehicle_status.load * 1000),
                 voltage_battery=int(self._get_battery_voltage() * 1000),
                 current_battery=int(self._get_battery_current() * 100),
@@ -282,14 +294,14 @@ class TelemetryMAVLinkBridge(Node):
                 errors_count3=0,
                 errors_count4=0,
             )
-            self._send_mavlink_frame(self.MAVLINK_MSG_ID_SYS_STATUS, payload)
+            self._send_mavlink_frame(mav.MAVLINK_MSG_ID_SYS_STATUS, payload)
 
         # Battery Status
         if self._battery_status is not None:
-            payload = self._build_battery_status(
-                id=0,
+            payload = mav.build_battery_status(
+                id_=0,
                 battery_function=0,  # MAV_BATTERY_FUNCTION_ALL
-                type=2,  # MAV_BATTERY_TYPE_LIPO
+                type_=2,  # MAV_BATTERY_TYPE_LIPO
                 temperature=self._battery_status.temperature,
                 voltages=[int(v * 1000) for v in self._battery_status.voltage_cell_v[:10]],
                 current_battery=int(self._battery_status.current_a * 100),
@@ -299,159 +311,30 @@ class TelemetryMAVLinkBridge(Node):
                 time_remaining=0,
                 charge_state=0,
             )
-            self._send_mavlink_frame(self.MAVLINK_MSG_ID_BATTERY_STATUS, payload)
-
-    # ===== MAVLink Message Builders =====
-
-    def _build_heartbeat(self, type, autopilot, base_mode, custom_mode, system_status, mavlink_version):
-        """Build HEARTBEAT payload."""
-        return struct.pack('<I B B B B B',
-            custom_mode,
-            type,
-            autopilot,
-            base_mode,
-            system_status,
-            mavlink_version
-        )
-
-    def _build_global_position_int(self, time_boot_ms, lat, lon, alt, relative_alt, vx, vy, vz, hdg):
-        """Build GLOBAL_POSITION_INT payload."""
-        return struct.pack('<I i i i i h h h H',
-            time_boot_ms,
-            lat,
-            lon,
-            alt,
-            relative_alt,
-            vx,
-            vy,
-            vz,
-            hdg
-        )
-
-    def _build_attitude(self, time_boot_ms, roll, pitch, yaw, rollspeed, pitchspeed, yawspeed):
-        """Build ATTITUDE payload."""
-        return struct.pack('<I f f f f f f',
-            time_boot_ms,
-            roll,
-            pitch,
-            yaw,
-            rollspeed,
-            pitchspeed,
-            yawspeed
-        )
-
-    def _build_sys_status(self, onboard_control_sensors_present, onboard_control_sensors_enabled,
-                         onboard_control_sensors_health, load, voltage_battery, current_battery,
-                         battery_remaining, drop_rate_comm, errors_comm, errors_count1,
-                         errors_count2, errors_count3, errors_count4):
-        """Build SYS_STATUS payload."""
-        return struct.pack('<H H H H H h b B H H H H H',
-            onboard_control_sensors_present,
-            onboard_control_sensors_enabled,
-            onboard_control_sensors_health,
-            load,
-            voltage_battery,
-            current_battery,
-            battery_remaining,
-            drop_rate_comm,
-            errors_comm,
-            errors_count1,
-            errors_count2,
-            errors_count3,
-            errors_count4
-        )
-
-    def _build_battery_status(self, id, battery_function, type, temperature, voltages, current_battery,
-                             current_consumed, energy_consumed, battery_remaining, time_remaining, charge_state):
-        """Build BATTERY_STATUS payload."""
-        # Pack voltages (up to 10 cells)
-        voltage_data = struct.pack('<10H', *[v if i < len(voltages) else 0 for i, v in enumerate([0]*10)])
-
-        return struct.pack('<i h h h h B B',
-            id,
-            battery_function,
-            type,
-            temperature,
-            current_battery,
-            battery_remaining,
-            charge_state
-        ) + voltage_data + struct.pack('<h i h',
-            current_consumed,
-            energy_consumed,
-            time_remaining
-        )
+            self._send_mavlink_frame(mav.MAVLINK_MSG_ID_BATTERY_STATUS, payload)
 
     # ===== MAVLink Frame Transmission =====
 
     def _send_mavlink_frame(self, msg_id: int, payload: bytes):
-        """Send MAVLink 2.0 frame."""
+        """Send a spec-compliant MAVLink 2.0 frame."""
         if self._socket is None:
             return
 
         seq = self._sequence % 256
         self._sequence += 1
 
-        # Frame: [STX] [LEN] [INV] [MSG_ID] [SYSID] [COMPID] [SEQ] [PAYLOAD] [CRC]
-        frame = self._build_mavlink_frame(msg_id, seq, payload)
+        frame = mav.build_frame(msg_id, seq, payload, self.system_id, self.component_id)
 
         try:
             self._socket.send(frame)
         except OSError as e:
             self.get_logger().warn(f'Failed to send MAVLink packet: {e}')
 
-    def _build_mavlink_frame(self, msg_id: int, seq: int, payload: bytes) -> bytes:
-        """Build MAVLink 2.0 frame."""
-        stx = 0xFD
-        payload_len = len(payload)
-        incomp_flags = 0x00
-
-        frame_data = struct.pack(
-            '<BBBBBBB',
-            stx,
-            payload_len,
-            incomp_flags,
-            msg_id & 0xFF,
-            self.system_id,
-            self.component_id,
-            seq
-        ) + payload
-
-        crc = self._compute_mavlink_crc(frame_data[1:], msg_id)
-        return frame_data + struct.pack('<H', crc)
-
-    @staticmethod
-    def _compute_mavlink_crc(data: bytes, msg_id: int) -> int:
-        """Compute MAVLink CRC16-CCITT."""
-        CRC_INIT = 0xFFFF
-        CRC_POLY = 0xEF01
-
-        # CRC_EXTRA values for common messages
-        CRC_EXTRA_MAP = {
-            0: 50,      # HEARTBEAT
-            1: 124,     # SYS_STATUS
-            30: 15,     # ATTITUDE
-            32: 49,     # LOCAL_POSITION_NED
-            33: 104,    # GLOBAL_POSITION_INT
-            147: 60,    # BATTERY_STATUS
-        }
-
-        crc_extra = CRC_EXTRA_MAP.get(msg_id, 0)
-
-        crc = CRC_INIT
-        for byte in data:
-            tmp = byte ^ (crc & 0xFF)
-            tmp = (tmp ^ (tmp << 4)) & 0xFF
-            crc = (crc >> 8) ^ (tmp << 8) ^ (tmp << 3) ^ (tmp >> 4)
-            crc &= 0xFFFF
-
-        tmp = crc_extra ^ (crc & 0xFF)
-        tmp = (tmp ^ (tmp << 4)) & 0xFF
-        crc = (crc >> 8) ^ (tmp << 8) ^ (tmp << 3) ^ (tmp >> 4)
-        crc &= 0xFFFF
-
-        return crc
-
     # ===== Utility Helpers =====
+
+    def _time_boot_ms(self) -> int:
+        """Milliseconds since this node started, wrapped to fit uint32."""
+        return int((time.monotonic() - self._boot_time) * 1000) & 0xFFFFFFFF
 
     def _get_battery_voltage(self) -> float:
         """Get battery voltage in volts."""

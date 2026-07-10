@@ -3,175 +3,99 @@ Shared pytest configuration and fixtures for MAVLink bridge tests.
 
 This module provides:
   - Pytest configuration
-  - Shared fixtures for MAVLink frame building
+  - Shared fixtures for MAVLink frame building, delegating to the real,
+    pymavlink-verified mavlink_v2 module rather than a parallel
+    reimplementation
   - ROS 2 node stubs for isolated testing
 """
 
-import struct
+import sys
+from pathlib import Path
+
 import pytest
 
+# mavlink_v2.py lives at the mavlink-bridge/ root, one level above tests/.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-class MockMAVLinkBuilder:
-    """Helper class for building and validating MAVLink frames in tests."""
+import mavlink_v2 as mav
+
+
+class MAVLinkBuilder:
+    """Thin adapter over the real mavlink_v2 codec, kept for tests that were
+    already written against this fixture's method names. Delegates entirely
+    to mavlink_v2 -- it does not reimplement frame/CRC logic itself, which is
+    exactly what let the original 7-byte-header bug go undetected across the
+    whole test suite despite 100% pass rate.
+    """
 
     @staticmethod
     def build_frame(msg_id: int, seq: int, payload: bytes, system_id: int = 1, component_id: int = 1) -> bytes:
-        """Build a complete MAVLink 2.0 frame."""
-        stx = 0xFD
-        payload_len = len(payload)
-        incomp_flags = 0x00
-
-        frame_data = struct.pack(
-            '<BBBBBBB',
-            stx, payload_len, incomp_flags, msg_id & 0xFF,
-            system_id, component_id, seq
-        ) + payload
-
-        crc = MockMAVLinkBuilder.compute_crc(frame_data[1:], msg_id)
-        return frame_data + struct.pack('<H', crc)
+        return mav.build_frame(msg_id, seq, payload, system_id, component_id)
 
     @staticmethod
     def compute_crc(data: bytes, msg_id: int) -> int:
-        """Compute MAVLink CRC16-CCITT."""
-        CRC_INIT = 0xFFFF
-        CRC_EXTRA_MAP = {
-            0: 50,      # HEARTBEAT
-            1: 124,     # SYS_STATUS
-            30: 15,     # ATTITUDE
-            32: 49,     # LOCAL_POSITION_NED
-            33: 104,    # GLOBAL_POSITION_INT
-            147: 60,    # BATTERY_STATUS
-            253: 83,    # STATUSTEXT
-        }
-
-        crc_extra = CRC_EXTRA_MAP.get(msg_id, 0)
-        crc = CRC_INIT
-
-        for byte in data:
-            tmp = byte ^ (crc & 0xFF)
-            tmp = (tmp ^ (tmp << 4)) & 0xFF
-            crc = (crc >> 8) ^ (tmp << 8) ^ (tmp << 3) ^ (tmp >> 4)
-            crc &= 0xFFFF
-
-        tmp = crc_extra ^ (crc & 0xFF)
-        tmp = (tmp ^ (tmp << 4)) & 0xFF
-        crc = (crc >> 8) ^ (tmp << 8) ^ (tmp << 3) ^ (tmp >> 4)
-        crc &= 0xFFFF
-
-        return crc
+        return mav.compute_crc(data, msg_id)
 
     @staticmethod
     def parse_frame(frame: bytes) -> dict:
-        """Parse a MAVLink 2.0 frame into components."""
-        if len(frame) < 10:
+        parsed = mav.parse_frame(frame)
+        if parsed is None:
             return None
-
-        stx = frame[0]
-        payload_len = frame[1]
-        msg_id = frame[3]
-        system_id = frame[4]
-        component_id = frame[5]
-        sequence = frame[6]
-        payload = frame[7:7+payload_len]
-        crc = struct.unpack('<H', frame[-2:])[0]
-
         return {
-            'stx': stx,
-            'payload_len': payload_len,
-            'msg_id': msg_id,
-            'system_id': system_id,
-            'component_id': component_id,
-            'sequence': sequence,
-            'payload': payload,
-            'crc': crc,
-            'valid': stx == 0xFD and len(frame) == 7 + payload_len + 2,
+            'stx': mav.MAVLINK_STX,
+            'payload_len': len(parsed.payload),
+            'msg_id': parsed.msg_id,
+            'system_id': parsed.system_id,
+            'component_id': parsed.component_id,
+            'sequence': parsed.sequence,
+            'payload': parsed.payload,
+            'crc': parsed.crc,
+            'valid': parsed.valid,
         }
+
+
+# Backward-compatible alias -- some earlier test files imported this name directly.
+MockMAVLinkBuilder = MAVLinkBuilder
 
 
 @pytest.fixture
 def mavlink_builder():
-    """Provide MAVLink frame builder for tests."""
-    return MockMAVLinkBuilder
+    """Provide the MAVLink frame builder/parser for tests."""
+    return MAVLinkBuilder
 
 
 @pytest.fixture
 def sample_heartbeat_payload():
-    """Provide a sample HEARTBEAT payload."""
-    custom_mode = 4  # Offboard
-    type_ = 2  # Quadrotor
-    autopilot = 4  # PX4
-    base_mode = 0x80  # Armed
-    system_status = 4  # Active
-    mavlink_version = 3
-
-    return struct.pack('<I B B B B B',
-        custom_mode, type_, autopilot, base_mode, system_status, mavlink_version
-    )
+    """Sample HEARTBEAT payload, built via the real, verified codec."""
+    return mav.build_heartbeat(
+        type_=2, autopilot=4, base_mode=0x80, custom_mode=4, mavlink_version=3)
 
 
 @pytest.fixture
 def sample_global_position_payload():
-    """Provide a sample GLOBAL_POSITION_INT payload."""
-    time_boot_ms = 1000
-    lat = 377_749_000  # San Francisco
-    lon = -1_224_194_000
-    alt = 500_000  # 500m MSL
-    relative_alt = 100_000  # 100m above home
-    vx = 250  # 2.5 m/s
-    vy = -100
-    vz = 50
-    hdg = 9000  # 90 degrees
-
-    return struct.pack('<I i i i i h h h H',
-        time_boot_ms, lat, lon, alt, relative_alt, vx, vy, vz, hdg
-    )
+    """Sample GLOBAL_POSITION_INT payload (San Francisco), built via the
+    real, verified codec."""
+    return mav.build_global_position_int(
+        time_boot_ms=1000, lat=377_749_000, lon=-1_224_194_000, alt=500_000,
+        relative_alt=100_000, vx=250, vy=-100, vz=50, hdg=9000)
 
 
 @pytest.fixture
 def sample_attitude_payload():
-    """Provide a sample ATTITUDE payload."""
-    time_boot_ms = 1000
-    roll = 0.1
-    pitch = -0.2
-    yaw = 1.57
-    rollspeed = 0.05
-    pitchspeed = 0.02
-    yawspeed = 0.01
-
-    return struct.pack('<I f f f f f f',
-        time_boot_ms, roll, pitch, yaw, rollspeed, pitchspeed, yawspeed
-    )
+    """Sample ATTITUDE payload, built via the real, verified codec."""
+    return mav.build_attitude(
+        time_boot_ms=1000, roll=0.1, pitch=-0.2, yaw=1.57,
+        rollspeed=0.05, pitchspeed=0.02, yawspeed=0.01)
 
 
 @pytest.fixture
 def sample_battery_status_payload():
-    """Provide a sample BATTERY_STATUS payload."""
-    id_ = 0
-    battery_function = 0
-    type_ = 2
-    temperature = 25
-    current_battery = 250
-    battery_remaining = 75
-    charge_state = 0
-
-    voltage_data = struct.pack('<10H',
-        4200, 4190, 4180, 0, 0, 0, 0, 0, 0, 0
-    )
-
-    current_consumed = 2500
-    energy_consumed = 45_000
-    time_remaining = 0
-
-    header = struct.pack('<i h h h h B B',
-        id_, battery_function, type_, temperature,
-        current_battery, battery_remaining, charge_state
-    )
-
-    footer = struct.pack('<h i h',
-        current_consumed, energy_consumed, time_remaining
-    )
-
-    return header + voltage_data + footer
+    """Sample BATTERY_STATUS payload, built via the real, verified codec."""
+    return mav.build_battery_status(
+        id_=0, battery_function=0, type_=2, temperature=25,
+        voltages=[4200, 4190, 4180, 0, 0, 0, 0, 0, 0, 0],
+        current_battery=250, current_consumed=2500, energy_consumed=45_000,
+        battery_remaining=75)
 
 
 # Pytest configuration
