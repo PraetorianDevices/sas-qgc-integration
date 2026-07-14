@@ -51,8 +51,11 @@ CRC_EXTRA = {
     47: 153,    # MISSION_ACK
     51: 196,    # MISSION_REQUEST_INT
     73: 38,     # MISSION_ITEM_INT
+    76: 152,    # COMMAND_LONG
+    77: 143,    # COMMAND_ACK
     147: 154,   # BATTERY_STATUS
     253: 83,    # STATUSTEXT
+    330: 23,    # OBSTACLE_DISTANCE
 }
 
 # Message IDs used across the SAS-QGC bridges.
@@ -70,8 +73,11 @@ MAVLINK_MSG_ID_MISSION_ITEM_REACHED = 46
 MAVLINK_MSG_ID_MISSION_ACK = 47
 MAVLINK_MSG_ID_MISSION_REQUEST_INT = 51
 MAVLINK_MSG_ID_MISSION_ITEM_INT = 73
+MAVLINK_MSG_ID_COMMAND_LONG = 76
+MAVLINK_MSG_ID_COMMAND_ACK = 77
 MAVLINK_MSG_ID_BATTERY_STATUS = 147
 MAVLINK_MSG_ID_STATUSTEXT = 253
+MAVLINK_MSG_ID_OBSTACLE_DISTANCE = 330
 
 HEADER_LEN = 10  # bytes 0..9, i.e. everything before the payload
 CRC_LEN = 2
@@ -93,6 +99,16 @@ class MissionType(IntEnum):
     FENCE = 1
     RALLY = 2
     ALL = 255
+
+
+class MAVResult(IntEnum):
+    """MAV_RESULT values used in COMMAND_ACK.result."""
+    ACCEPTED = 0
+    TEMPORARILY_REJECTED = 1
+    DENIED = 2
+    UNSUPPORTED = 3
+    FAILED = 4
+    IN_PROGRESS = 5
 
 
 class ParsedFrame(NamedTuple):
@@ -416,3 +432,60 @@ def parse_mission_request(payload: bytes) -> Optional[dict]:
 def build_mission_item_reached(seq: int) -> bytes:
     """MISSION_ITEM_REACHED (id 46): seq:u16."""
     return struct.pack('<H', seq)
+
+
+def parse_command_long(payload: bytes) -> Optional[dict]:
+    """Parse COMMAND_LONG (id 76). Verified wire order:
+    param1-7:float, command:u16, target_system:u8, target_component:u8,
+    confirmation:u8.
+
+    MAVLink 2's trailing-zero truncation means a COMMAND_LONG whose later
+    params/confirmation are 0 arrives shorter than its full 33 bytes; zero-fill
+    rather than rejecting, or a legitimate command with param7=0/confirmation=0
+    (the common case) would be dropped.
+    """
+    payload = payload.ljust(33, b'\x00')
+    (param1, param2, param3, param4, param5, param6, param7,
+     command, target_system, target_component, confirmation) = struct.unpack(
+        '<fffffffHBBB', payload[:33]
+    )
+    return {
+        'command': command,
+        'target_system': target_system,
+        'target_component': target_component,
+        'confirmation': confirmation,
+        'params': [param1, param2, param3, param4, param5, param6, param7],
+    }
+
+
+def build_command_ack(command: int, result: int, progress: int = 0,
+                       result_param2: int = 0, target_system: int = 0,
+                       target_component: int = 0) -> bytes:
+    """COMMAND_ACK (id 77): command:u16, result:u8, then extensions
+    progress:u8, result_param2:i32, target_system:u8, target_component:u8.
+    The extension fields default to 0 and are truncated away by build_frame
+    for a minimal ACK (command+result), which real GCSs accept."""
+    return struct.pack('<HBBiBB', command, result, progress, result_param2,
+                        target_system, target_component)
+
+
+def build_obstacle_distance(time_usec: int, distances: list, increment: int,
+                             min_distance: int, max_distance: int,
+                             increment_f: float = 0.0, angle_offset: float = 0.0,
+                             sensor_type: int = 0, frame: int = 12) -> bytes:
+    """OBSTACLE_DISTANCE (id 330). Verified wire order (NOT declaration order):
+    time_usec:u64, distances[72]:u16, min_distance:u16, max_distance:u16,
+    sensor_type:u8, increment:u8, increment_f:float, angle_offset:float,
+    frame:u8.
+
+    `distances` is per-sector distance in centimetres (65535 = no obstacle /
+    unknown); padded/truncated to exactly 72 sectors. `increment` is the
+    integer degrees per sector; `increment_f` (float degrees) overrides it when
+    non-zero. `frame` defaults to 12 (MAV_FRAME_BODY_FRD), matching the SF45
+    sweep produced by sf45_px4_node."""
+    sectors = list(distances)[:72] + [65535] * max(0, 72 - len(distances))
+    return struct.pack(
+        '<Q72HHHBBffB',
+        time_usec, *sectors, min_distance, max_distance,
+        sensor_type, increment, increment_f, angle_offset, frame,
+    )

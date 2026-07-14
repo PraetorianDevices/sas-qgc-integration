@@ -134,6 +134,29 @@ class TestFrameHeaderAgainstPymavlink:
         ours = mav.build_frame(mav.MAVLINK_MSG_ID_MISSION_ITEM_REACHED, 0, payload, 1, 200)
         assert ours == theirs
 
+    def test_command_ack(self, mav_ref):
+        theirs = mav_ref.command_ack_encode(
+            command=31010, result=0, progress=0, result_param2=0,
+            target_system=255, target_component=0).pack(mav_ref)
+        payload = mav.build_command_ack(command=31010, result=0, target_system=255, target_component=0)
+        ours = mav.build_frame(mav.MAVLINK_MSG_ID_COMMAND_ACK, 0, payload, 1, 200)
+        assert ours == theirs
+
+    def test_obstacle_distance(self, mav_ref):
+        distances = [65535] * 72
+        distances[0] = 150
+        distances[18] = 300
+        theirs = mav_ref.obstacle_distance_encode(
+            time_usec=123456, sensor_type=0, distances=distances, increment=5,
+            min_distance=20, max_distance=5000, increment_f=5.0,
+            angle_offset=0.0, frame=12).pack(mav_ref)
+        payload = mav.build_obstacle_distance(
+            time_usec=123456, distances=distances, increment=5,
+            min_distance=20, max_distance=5000, increment_f=5.0,
+            angle_offset=0.0, sensor_type=0, frame=12)
+        ours = mav.build_frame(mav.MAVLINK_MSG_ID_OBSTACLE_DISTANCE, 0, payload, 1, 200)
+        assert ours == theirs
+
 
 class TestFrameHeaderStructure:
     """Structural checks independent of pymavlink -- these describe the
@@ -206,6 +229,38 @@ class TestMissionItemIntRoundtrip:
         parsed = mav.parse_mission_item_int(truncated)
         assert parsed is not None
         assert parsed['mission_type'] == 0
+
+
+class TestCommandLongParse:
+    """parse_command_long against pymavlink-encoded COMMAND_LONG frames --
+    this is the inbound message the emergency-wipe bridge gates on, so its
+    param/command/confirmation fields must be read from the exact wire order."""
+
+    def test_parses_pymavlink_encoded_command(self, mav_ref):
+        frame = mav_ref.command_long_encode(
+            target_system=1, target_component=1, command=31010, confirmation=1,
+            param1=1.0, param2=2.0, param3=3.0, param4=4.0,
+            param5=5.0, param6=6.0, param7=7.0).pack(mav_ref)
+        parsed = mav.parse_frame(frame)
+        cmd = mav.parse_command_long(parsed.payload)
+        assert cmd['command'] == 31010
+        assert cmd['target_system'] == 1
+        assert cmd['target_component'] == 1
+        assert cmd['confirmation'] == 1
+        assert cmd['params'] == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+
+    def test_zeroed_command_survives_truncation(self, mav_ref):
+        # command=0, all params 0, confirmation 0 -> payload truncates hard.
+        frame = mav_ref.command_long_encode(
+            target_system=0, target_component=0, command=0, confirmation=0,
+            param1=0.0, param2=0.0, param3=0.0, param4=0.0,
+            param5=0.0, param6=0.0, param7=0.0).pack(mav_ref)
+        parsed = mav.parse_frame(frame)
+        cmd = mav.parse_command_long(parsed.payload)
+        assert cmd is not None
+        assert cmd['command'] == 0
+        assert cmd['confirmation'] == 0
+        assert cmd['params'] == [0.0] * 7
 
 
 class TestTruncationEdgeCases:
