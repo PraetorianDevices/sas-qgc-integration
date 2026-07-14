@@ -93,14 +93,14 @@ The SAS repository is a mature ROS 2 autonomous drone system with 15 nodes cover
 
 #### 5. **collision_offboard_controller_node** (`my_python_package/collision_offboard_controller_node.py`)
 - **Purpose:** Enhanced offboard control with collision avoidance (obstacle distance from SF45 LiDAR)
-- **Current I/O:** Subscribes to `/fmu/out/obstacle_distance`, publishes collision-aware trajectories
+- **Current I/O:** Subscribes to `/fmu/in/obstacle_distance`, publishes collision-aware trajectories
 - **QGC Integration Point:**
   - Visualize obstacle grid / heatmap on QGC map (custom QML)
   - Display collision risk score (real-time)
   - **Optional:** Allow operator to adjust collision avoidance thresholds from QGC UI
 - **Critical Files:**
   - `my_python_package/collision_offboard_controller_node.py`
-  - `/fmu/out/obstacle_distance` (from SF45 LiDAR via `sf45_px4_node`)
+  - `/fmu/in/obstacle_distance` (from SF45 LiDAR via `sf45_px4_node`)
 - **Why:** Collision avoidance is critical for safety; real-time visualization helps operator understand vehicle behavior.
 
 ---
@@ -149,7 +149,7 @@ QGroundControl
 │     ├─ offboard_controller_node (/fmu/out/*)
 │     ├─ gps_spoof_detector_node (/gps_spoof_alert)
 │     ├─ fleet_manager_node (/fleet/status)
-│     └─ collision_offboard_controller_node (/fmu/out/obstacle_distance)
+│     └─ collision_offboard_controller_node (/fmu/in/obstacle_distance)
 │
 ├─ Custom QGC Plugin (NEW)
 │  ├─ SASPlugin.h/cpp (extends QGCCorePlugin)

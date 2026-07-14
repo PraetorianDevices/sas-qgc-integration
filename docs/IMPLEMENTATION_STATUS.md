@@ -1,13 +1,9 @@
 # SAS-QGC Integration: Implementation Status Report
 
-**Last Updated:** 2026-07-10
-**Overall Status:** Phase 0 (MAVLink protocol correctness) is complete. All three bridges are verified against pymavlink, mission signing is wired into the live upload path, secure_launch.py is fixed, and the entire mavlink-bridge test suite now imports and exercises real production code. Phase 2 (Fleet Manager / Collision / Emergency Wipe bridges) and Phase 3 (QGC plugin) remain not started.
+**Last Updated:** 2026-07-14
+**Overall Status:** Phases 0, 1, 1.5, and 2 are complete. All six bridges are verified against pymavlink, mission signing is wired into the live upload path, secure_launch.py is fixed, and the entire mavlink-bridge test suite (173 tests) imports and exercises real production code. Phase 2 (Fleet Manager / Collision / Emergency Wipe bridges) is now done; Phase 3 (QGC plugin) remains not started, and no phase has yet been validated against live QGroundControl/PX4 hardware.
 
----
-
-## Why This Doc Was Rewritten (history)
-
-An earlier version of this document reported "50% complete," "production-ready," and "zero test redundancy" based on ~130 passing tests. A line-by-line review — cross-checked byte-for-byte against `pymavlink` as ground truth — found the MAVLink v2 frame header was structurally wrong in every bridge (a 7-byte header instead of the real 10-byte one), that most of the ~130 "passing" tests never imported the modules they claimed to test, that mission signing existed but was never wired in, and that `secure_launch.py` set a nonexistent environment variable. All of that has since been fixed; this document now reflects the corrected state.
+**Branch note:** all of this work lives on `develop` in both the outer repo and the `SAS` submodule (each has its own `develop`). 
 
 ---
 
@@ -19,11 +15,14 @@ An earlier version of this document reported "50% complete," "production-ready,"
 | `gps_spoof_mavlink_bridge.py` | ✅ Migrated to `mavlink_v2` | ✅ STATUSTEXT | ✅ Via shared codec | ✅ **DONE** |
 | `telemetry_mavlink_bridge.py` | ✅ Migrated to `mavlink_v2` | ✅ SYS_STATUS (32-bit sensor bitmasks, correct field order), BATTERY_STATUS (real per-cell voltages, no longer always 0) | ✅ Via shared codec + real-bridge functional tests | ✅ **DONE** |
 | `mission_control_bridge.py` | ✅ Migrated to `mavlink_v2` | ✅ Switched to `MISSION_ITEM_INT`; MISSION_ACK/MISSION_CURRENT/MISSION_COUNT rewritten to the real spec; full upload handshake implemented (inbound `MISSION_COUNT` → sequential `MISSION_REQUEST_INT` pulls → single `MISSION_ACK` after the last item); `_mission_upload_pub.publish()` is now actually called | ✅ Via shared codec + real UDP-socket integration tests | ✅ **DONE** |
+| `fleet_manager_mavlink_bridge.py` (Phase 2) | ✅ Uses `mavlink_v2` | ✅ STATUSTEXT per-drone mission-state/progress summaries from `/fleet/status`, de-duplicated | ✅ Via shared codec + real UDP-socket integration tests | ✅ **DONE** |
+| `collision_mavlink_bridge.py` (Phase 2) | ✅ Uses `mavlink_v2` | ✅ OBSTACLE_DISTANCE (330), new codec message verified byte-for-byte; near 1:1 forward of the SF45 sweep from `/fmu/in/obstacle_distance` | ✅ Via shared codec + real UDP-socket + pymavlink round-trip | ✅ **DONE** |
+| `emergency_wipe_mavlink_bridge.py` (Phase 2) | ✅ Uses `mavlink_v2` | ✅ COMMAND_LONG (76) parse + COMMAND_ACK (77) build, new codec messages verified byte-for-byte; two-factor gate before calling the wipe service | ✅ Via shared codec + real bound-socket + real receiver-thread integration tests | ✅ **DONE** |
 
 ### Bugs found and fixed during the telemetry/mission-control migration (beyond the frame header itself)
 
 - **`telemetry_mavlink_bridge.py`:** `time_boot_ms=int(time.time()*1000)` overflowed MAVLink's `uint32` field (Unix-epoch ms is ~1.7 trillion; the field maxes at ~4.3 billion) and would have crashed `struct.pack` on every telemetry publish once a GPS fix was present. Pre-existing, not introduced this pass. Fixed by tracking a monotonic boot-time reference instead.
-- **`telemetry_mavlink_bridge.py`:** `_get_battery_voltage()` divides the cell-voltage sum by 1000 assuming millivolt input, but PX4's `voltage_cell_v` is in volts (the same file's `BATTERY_STATUS` conversion correctly treats it as volts elsewhere). Makes `SYS_STATUS.voltage_battery` report ~1000x too low. **Found but not fixed** — a data-accuracy issue, not a protocol/crash issue, left as a known gap rather than silently expanding scope.
+- **`telemetry_mavlink_bridge.py`:** `_get_battery_voltage()` divided the cell-voltage sum by 1000 assuming millivolt input, but PX4's `voltage_cell_v` is in volts (the same file's `BATTERY_STATUS` conversion correctly treats it as volts elsewhere), making `SYS_STATUS.voltage_battery` report ~1000x too low. **Fixed** — removed the erroneous divide; added `test_sys_status_battery_voltage_is_pack_voltage_not_1000x_low` regression test.
 - **`mission_control_bridge.py`:** outbound replies were hardcoded to `('localhost', 14550)`, ignoring both the actual UDP sender's address and any configured `mavlink_port` — silently breaking the documented multi-drone setup (a different port per drone). Fixed: the bridge now replies to the address of whoever last contacted it, falling back to its own configured `(mavlink_host, mavlink_port)` before any packet has been received.
 - **`mission_control_bridge.py`:** `MAVLINK_MSG_ID_MISSION_ITEM_REACHED` was hardcoded as `61`; the real ID is `46`. Fixed by switching to `mavlink_v2`'s verified constants.
 - **`mavlink_v2.py` (caught by testing, not shipped):** `parse_mission_ack`/`parse_mission_count`/`parse_mission_request` originally rejected payloads shorter than their un-truncated size, but MAVLink 2's trailing-zero-truncation rule means a `MISSION_ACK(result=ACCEPTED)` or an empty `MISSION_COUNT(0)` legitimately arrives shorter. Fixed to zero-fill, matching the same fix already applied to `parse_mission_item_int`.
@@ -36,15 +35,20 @@ Every mavlink-bridge test file now imports and exercises its corresponding produ
 
 | Test File | Tests | Notes |
 |-----------|-------|-------|
-| `test_mavlink_v2.py` (new) | 22 | Byte-for-byte vs pymavlink for all 12 message types, plus header-structure and truncation-edge-case tests. Skips gracefully if `pymavlink` isn't installed. |
+| `test_mavlink_v2.py` (new) | 26 | Byte-for-byte vs pymavlink for all 15 message types (incl. Phase 2's OBSTACLE_DISTANCE/COMMAND_LONG/COMMAND_ACK), plus header-structure and truncation-edge-case tests. Skips gracefully if `pymavlink` isn't installed. |
 | `test_mavlink_crc.py` (rewritten) | 14 | Real `GPSSpoofMAVLinkBridge`; absorbed the previously-separate `test_mavlink_frame_generation.py`, which was pure duplication and has been deleted. No longer requires `rclpy` to be installed — stubs it. |
 | `test_mission_signing.py` (rewritten) | 28 | Real `MissionSigner`/`MissionVerifier` with a genuinely generated RSA-2048 keypair; tampering tests now actually re-verify mutated signed data instead of comparing two dict values to each other. |
-| `test_telemetry_conversion.py` (rewritten) | 17 | Real `TelemetryMAVLinkBridge`, realistic PX4-shaped mock telemetry; includes regression tests for the SYS_STATUS field-width bug, the BATTERY_STATUS voltage bug, and the `time_boot_ms` overflow crash. |
+| `test_telemetry_conversion.py` (rewritten) | 18 | Real `TelemetryMAVLinkBridge`, realistic PX4-shaped mock telemetry; includes regression tests for the SYS_STATUS field-width bug, the BATTERY_STATUS per-cell-voltage bug, the SYS_STATUS pack-voltage units bug, and the `time_boot_ms` overflow crash. |
 | `test_mission_control_bridge.py` (rewritten) | 29 | Real `MissionControlBridge`; full upload/download handshake, GCS-identity learning, reply-address regression test. |
 | `test_mission_control_integration.py` (rewritten) | 6 | Real bridge with a **real bound UDP socket and real background receiver thread**, driven from a second real socket — genuine byte-level round-trip, not a fake socket object. |
 | `test_gps_spoof_integration.py` (rewritten) | 8 | Real `GPSSpoofMAVLinkBridge` with a real UDP socket on each end. No longer requires `rclpy` to be installed. |
+| `test_fleet_manager_bridge.py` + `test_fleet_manager_integration.py` (Phase 2) | 13 + 3 | Real `FleetManagerMAVLinkBridge`; double-encoded `/fleet/status` parsing, per-drone STATUSTEXT, de-duplication, severity mapping, real UDP socket. |
+| `test_collision_bridge.py` + `test_collision_integration.py` (Phase 2) | 7 + 3 | Real `CollisionMAVLinkBridge`; ObstacleDistance→OBSTACLE_DISTANCE, distances survive the wire (pymavlink round-trip), real UDP socket. |
+| `test_emergency_wipe_bridge.py` + `test_emergency_wipe_integration.py` (Phase 2) | 14 + 4 | Real `EmergencyWipeMAVLinkBridge`; two-factor gate (accept/deny/temporarily-reject), command filtering, CRC rejection, reply addressing over a real bound socket + real receiver thread. |
 
-**Full mavlink-bridge suite: 124 tests passed, zero exclusions** (previously, `test_mavlink_crc.py` had to be excluded because it required a real ROS 2 environment; that's no longer true). Full SAS unit suite: 1215 passed, 3 skipped — unaffected by this work.
+**Full mavlink-bridge suite: 173 tests passed, zero exclusions** (previously, `test_mavlink_crc.py` had to be excluded because it required a real ROS 2 environment; that's no longer true). Full SAS unit suite: 1215 passed, 3 skipped — unaffected by this work.
+
+**Test-suite order dependency, found and fixed:** `test_mavlink_crc.py`, `test_gps_spoof_integration.py`, `test_mission_control_bridge.py`, `test_mission_control_integration.py`, and `test_telemetry_conversion.py` each installed their own competing `rclpy`/`std_msgs`/`px4_msgs` stub into `sys.modules`. Because a module's class body only executes once and gets cached, whichever file's stub loaded first "won" for the rest of the process — `pytest tests/` (124 passed) only worked because directory scanning collects `tests/integration/` before `tests/unit/` alphabetically, loading the fully-capable stub first. Running unit-before-integration explicitly (e.g. `pytest tests/unit/test_mission_control_bridge.py tests/integration/test_mission_control_integration.py`) raised `TypeError: object.__init__() takes exactly one argument` — a latent fragility the full-directory run was silently masking. Fixed by consolidating all stubbing into a single, always-fully-capable stub in `tests/conftest.py` (with a new `ros_params` fixture for integration tests to configure e.g. ephemeral ports before construction), which pytest always imports first regardless of file selection or order. Verified with several non-default orderings (unit-first, integration-first, mixed) — all 124 tests now pass in every ordering tried.
 
 ---
 
@@ -84,17 +88,19 @@ While tracing mission-completion signaling for the MAVLink bridges, a real, unre
 
 ## What's Actually Production-Ready Today
 
-- ✅ All three MAVLink bridges (`gps_spoof_mavlink_bridge.py`, `telemetry_mavlink_bridge.py`, `mission_control_bridge.py`) — verified MAVLink-correct against pymavlink, real upload/download handshake, correct reply addressing.
+- ✅ All six MAVLink bridges (`gps_spoof`, `telemetry`, `mission_control`, plus Phase 2's `fleet_manager`, `collision`, `emergency_wipe`) — verified MAVLink-correct against pymavlink, real upload/download handshake, correct reply addressing.
 - ✅ Mission signing — cryptographically sound and wired into the live upload path.
 - ✅ Gesture safety gating — fully implemented and tested.
-- ✅ `secure_launch.py` — correct SROS2 environment variables (still needs enclaves generated for the 3 bridge nodes before it fully covers them).
-- ✅ Full mavlink-bridge test suite (124 tests) and SAS unit suite (1215 tests) — all importing and exercising real code.
+- ✅ Emergency-wipe trigger — gated behind a two-factor (magic-param + confirmation) check in the bridge, since the underlying Trigger service has no auth of its own.
+- ✅ `secure_launch.py` — correct SROS2 environment variables (still needs enclaves generated for the bridge nodes before it fully covers them).
+- ✅ Full mavlink-bridge test suite (173 tests) and SAS unit suite (1215 tests) — all importing and exercising real code.
+- ✅ `mavlink-bridge/demo_qgc_wire_protocol.py` (new) — a no-ROS-2, no-QGC-required live demo: the real `GPSSpoofMAVLinkBridge._send_statustext` sends genuine frames over a real UDP socket, decoded live by `pymavlink` (the same reference implementation QGC's own parser is built on). Useful both as a demo and as a fast local sanity check of the wire protocol.
+- ✅ `mavlink-bridge/test_gps_spoof_alert_generator.py` (new) — the console script `setup.py` referenced but didn't have; publishes synthetic `/gps_spoof_alert` messages for manual QGC testing (checklist Phases 5.2/5.4/7.1).
 
 ## What Is NOT Ready
 
-- ⚠️ `_get_battery_voltage()`'s units bug (reports ~1000x too low) — known, not fixed, low severity (data accuracy, not protocol/crash).
-- ⏳ DDS-Security enclaves for the 3 mavlink-bridge nodes — not generated (requires `ros2 security` CLI in a real ROS 2 environment).
-- ⏳ Fleet Manager / Collision / Emergency Wipe bridges (Phase 2) — not started.
+- ⏳ DDS-Security enclaves for the 6 mavlink-bridge nodes — not generated (requires `ros2 security` CLI in a real ROS 2 environment).
+- ⏳ Single inbound UDP demux — `mission_control_bridge` and `emergency_wipe_bridge` both bind to receive and can't share one port; the wipe bridge is on a separate `wipe_port` (14556) pending a MAVLink router (see Known Limitations #5).
 - ⏳ QGC Custom Plugin (Phase 3) — not started, requires C++/Qt/QML.
 - ⏳ Live ROS 2/WSL validation — everything above has been verified via unit/integration tests and real-socket simulation in this environment, but not yet run against a live ROS 2 install, real PX4/QGC, or real hardware.
 
@@ -102,11 +108,10 @@ While tracing mission-completion signaling for the MAVLink bridges, a real, unre
 
 ## Immediate Next Steps (Priority Order)
 
-1. **Live ROS 2 validation.** Launch the full bridge stack in WSL against a real QGroundControl instance and a PX4 SITL or real vehicle — everything to this point has been verified via unit tests, byte-for-byte pymavlink comparison, and real-socket simulation, but never against the actual external systems it's meant to interoperate with.
-2. Generate DDS-Security enclaves for the 3 mavlink-bridge nodes via `ros2 security create_enclave`.
-3. Fix `_get_battery_voltage()`'s units bug, if accurate SYS_STATUS battery voltage reporting matters for the deployment.
-4. Phase 2: Fleet Manager / Collision / Emergency Wipe bridges, built on the now-corrected `mavlink_v2.py` from day one.
-5. Phase 3: QGC Custom Plugin (separate session, C++/Qt/QML).
+1. **Live ROS 2 validation.** Launch the full bridge stack in WSL against a real QGroundControl instance and a PX4 SITL or real vehicle — everything to this point has been verified via unit tests, byte-for-byte pymavlink comparison, and real-socket simulation (plus, now, a live pymavlink-decoded UDP demo), but never against the actual external systems it's meant to interoperate with.
+2. Resolve the inbound single-UDP-port limitation (MAVLink router / single inbound demux) so both inbound bridges can share one QGC link.
+3. Generate DDS-Security enclaves for the 6 mavlink-bridge nodes via `ros2 security create_enclave`.
+4. Phase 3: QGC Custom Plugin (separate session, C++/Qt/QML).
 
 ---
 
@@ -115,5 +120,6 @@ While tracing mission-completion signaling for the MAVLink bridges, a real, unre
 1. **Mission Signer:** private key stored unencrypted on disk (file-permission-restricted only).
 2. **DDS-Security:** the pre-existing keystore does not cover the mavlink-bridge nodes; needs new enclaves.
 3. **QGC Plugin:** requires C++/Qt/QML, not attempted in any session so far.
-4. **`_get_battery_voltage()` units bug:** SYS_STATUS battery voltage reports ~1000x low. Not fixed.
-5. **No live validation yet:** all verification to date is unit/integration-level (pymavlink byte comparison, real sockets, real crypto) — not yet run against real QGroundControl, PX4, or hardware.
+4. **No live validation yet:** all verification to date is unit/integration-level (pymavlink byte comparison, real sockets, real crypto) — not yet run against real QGroundControl, PX4, or hardware.
+5. **Inbound single-UDP-port limitation (Phase 2):** each bridge is its own process/socket. Outbound bridges only send, so they share port 14550; but `mission_control_bridge` and `emergency_wipe_bridge` both `bind()` to receive, and two processes can't cleanly bind one UDP port. The wipe bridge defaults to a separate `wipe_port` (14556). QGC uses one comm link per vehicle, so production needs a MAVLink router / single inbound demux to reach both inbound bridges over one link.
+6. **`gps_spoof_mavlink_bridge` severity numbering is transposed (found in Phase 2, not fixed):** its `MAVSeverity` has `INFO = 0` (really EMERGENCY) and `CRITICAL = 5` (really NOTICE), so QGC would color a CRITICAL spoof alert as a low-priority notice and an INFO alert as an emergency — backwards. Phase 2's fleet and emergency-wipe bridges use spec-correct MAV_SEVERITY values; fixing gps_spoof (enum + its tests + `demo_qgc_wire_protocol.py`) is a flagged follow-up.
