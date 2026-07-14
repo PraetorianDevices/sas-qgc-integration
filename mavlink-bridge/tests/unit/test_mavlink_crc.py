@@ -28,21 +28,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-
-def _install_stubs():
-    if 'gps_spoof_mavlink_bridge' in sys.modules:
-        return
-    rclpy_mock = MagicMock()
-    rclpy_mock.node.Node = object
-    sys.modules['rclpy'] = rclpy_mock
-    sys.modules['rclpy.node'] = rclpy_mock.node
-    sys.modules['rclpy.qos'] = MagicMock()
-    sys.modules['std_msgs'] = MagicMock()
-    sys.modules['std_msgs.msg'] = MagicMock()
-
-
-_install_stubs()
-
+# rclpy/std_msgs stubs are installed once in tests/conftest.py, shared across
+# every test file -- see that module's docstring for why a per-file stub here
+# would be unsafe (gps_spoof_mavlink_bridge.py is also imported by
+# tests/integration/test_gps_spoof_integration.py, which needs a
+# fully-functional stub, not the minimal one this file used to install).
 import mavlink_v2 as mav
 from gps_spoof_mavlink_bridge import GPSSpoofMAVLinkBridge, MAVSeverity
 

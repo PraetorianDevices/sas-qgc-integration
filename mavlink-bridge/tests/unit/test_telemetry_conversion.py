@@ -32,26 +32,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
-def _install_stubs():
-    if 'telemetry_mavlink_bridge' in sys.modules:
-        return
-
-    rclpy_mock = MagicMock()
-    rclpy_mock.node.Node = object
-    sys.modules['rclpy'] = rclpy_mock
-    sys.modules['rclpy.node'] = rclpy_mock.node
-    sys.modules['rclpy.qos'] = MagicMock()
-
-    px4_msgs_mock = types.ModuleType('px4_msgs.msg')
-    for name in ('VehicleLocalPosition', 'VehicleAttitude', 'VehicleStatus',
-                 'BatteryStatus', 'SensorGps'):
-        setattr(px4_msgs_mock, name, type(name, (), {}))
-    sys.modules['px4_msgs'] = types.ModuleType('px4_msgs')
-    sys.modules['px4_msgs.msg'] = px4_msgs_mock
-
-
-_install_stubs()
-
+# rclpy/std_msgs/px4_msgs stubs are installed once in tests/conftest.py,
+# shared across every test file -- see that module's docstring for the
+# collision this consolidation avoids.
 import mavlink_v2 as mav
 from telemetry_mavlink_bridge import TelemetryMAVLinkBridge
 
@@ -244,6 +227,19 @@ class TestPublishTelemetryReal:
         assert voltages[2] == 4180
         assert voltages[3] == 4170
         assert any(v != 0 for v in voltages)
+
+    def test_sys_status_battery_voltage_is_pack_voltage_not_1000x_low(self, bridge_with_telemetry):
+        """Regression test: _get_battery_voltage() summed already-in-volts
+        cell readings and then divided by 1000 again, reporting ~1000x too
+        low (e.g. 16.74V pack reported as 0.01674V). voltage_battery is in
+        millivolts per the MAVLink spec, so 4 cells at ~4.2V should arrive
+        as roughly 16740, not 16 or 17."""
+        bridge, sent = bridge_with_telemetry
+        bridge._publish_telemetry()
+        parsed = _parsed(sent, mav.MAVLINK_MSG_ID_SYS_STATUS)
+        _, _, _, load, voltage_battery, *_ = struct.unpack(
+            '<IIIHHhHHHHHHb', parsed.payload.ljust(31, b'\x00')[:31])
+        assert voltage_battery == pytest.approx(16_740, abs=5)
 
     def test_no_gps_fix_skips_global_position_int(self, bridge_with_telemetry):
         bridge, sent = bridge_with_telemetry

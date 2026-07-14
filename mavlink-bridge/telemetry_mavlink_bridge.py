@@ -340,7 +340,10 @@ class TelemetryMAVLinkBridge(Node):
         """Get battery voltage in volts."""
         if self._battery_status is None:
             return 0.0
-        return sum(self._battery_status.voltage_cell_v[:self._battery_status.cell_count]) / 1000.0
+        # voltage_cell_v is already in volts (same field BATTERY_STATUS's
+        # per-cell voltages above correctly treat as volts) -- do not divide
+        # by 1000 again, or the summed pack voltage comes out ~1000x too low.
+        return sum(self._battery_status.voltage_cell_v[:self._battery_status.cell_count])
 
     def _get_battery_current(self) -> float:
         """Get battery current in amps."""

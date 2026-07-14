@@ -31,92 +31,35 @@ import sys
 import threading
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-
-def _install_ros_stubs():
-    if 'mission_control_bridge' in sys.modules:
-        return
-
-    class _DummyString:
-        def __init__(self):
-            self.data = ''
-
-    class _DummyNode:
-        def __init__(self, name):
-            self._logger = MagicMock()
-            self._publishers = {}
-            self._subscriptions = {}
-            self._timers = []
-
-        def declare_parameter(self, name, default=None):
-            pass
-
-        def get_parameter(self, name):
-            m = MagicMock()
-            m.value = _PARAM_VALUES.get(name, None)
-            return m
-
-        def create_publisher(self, msg_type, topic, qos):
-            pub = MagicMock()
-            self._publishers[topic] = pub
-            return pub
-
-        def create_subscription(self, msg_type, topic, callback, qos):
-            sub = MagicMock()
-            self._subscriptions[topic] = callback
-            return sub
-
-        def create_timer(self, period, callback):
-            timer = MagicMock()
-            self._timers.append(callback)
-            return timer
-
-        def get_logger(self):
-            return self._logger
-
-        def destroy_node(self):
-            pass
-
-    rclpy_mock = MagicMock()
-    rclpy_mock.node.Node = _DummyNode
-    rclpy_mock.ok.return_value = True
-    sys.modules['rclpy'] = rclpy_mock
-    sys.modules['rclpy.node'] = rclpy_mock.node
-    sys.modules['rclpy.qos'] = MagicMock()
-
-    std_msgs_mock = MagicMock()
-    std_msgs_mock.String = _DummyString
-    sys.modules['std_msgs'] = MagicMock()
-    sys.modules['std_msgs.msg'] = std_msgs_mock
-
-
-_PARAM_VALUES = {
-    'system_id': 1,
-    'component_id': 1,
-    'mavlink_host': 'localhost',
-    'mavlink_port': 0,  # ephemeral -- avoids port collisions between test runs
-    'drone_id': '',
-}
-
-_install_ros_stubs()
-
+# rclpy/std_msgs stubs are installed once in tests/conftest.py, shared across
+# every test file -- see that module's docstring for why a per-file stub here
+# would be unsafe (mission_control_bridge.py is also imported by
+# tests/unit/test_mission_control_bridge.py).
 import mavlink_v2 as mav
 from mission_control_bridge import MissionControlBridge
 
 
 @pytest.fixture
-def live_bridge():
+def live_bridge(ros_params):
     """A real MissionControlBridge with a real bound UDP socket and a real
     running receiver thread. Yields (bridge, bridge_addr); tears the thread
     down afterward by flipping rclpy.ok() to False and closing the socket.
     """
     import rclpy
     rclpy.ok.return_value = True
+
+    ros_params.update({
+        'system_id': 1,
+        'component_id': 1,
+        'mavlink_host': 'localhost',
+        'mavlink_port': 0,  # ephemeral -- avoids port collisions between test runs
+        'drone_id': '',
+    })
 
     bridge = MissionControlBridge()
     bridge_port = bridge._socket.getsockname()[1]

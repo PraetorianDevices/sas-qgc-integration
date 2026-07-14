@@ -6,11 +6,32 @@ This module provides:
   - Shared fixtures for MAVLink frame building, delegating to the real,
     pymavlink-verified mavlink_v2 module rather than a parallel
     reimplementation
-  - ROS 2 node stubs for isolated testing
+  - A single, consolidated rclpy/std_msgs/px4_msgs stub, installed once here
+    rather than per test file
+
+Why the stub lives here and not per-file: gps_spoof_mavlink_bridge.py is
+imported by both test_mavlink_crc.py (unit) and test_gps_spoof_integration.py
+(integration); mission_control_bridge.py is imported by both
+test_mission_control_bridge.py (unit) and test_mission_control_integration.py
+(integration). Python only executes a module's class bodies once and caches
+the result in sys.modules -- so whichever test file's rclpy stub happened to
+be active at first import "wins" for the rest of the process, regardless of
+what any later test file installs. Concretely: unit tests bypass __init__ via
+GPSSpoofMAVLinkBridge.__new__() and only need a trivial rclpy.node.Node
+stand-in, while integration tests call the real __init__() and need a fully
+functional one (declare_parameter/get_parameter/create_subscription/etc).
+Having each file install its own, different-capability stub meant the test
+suite's pass/fail depended on file *collection order* -- `pytest tests/`
+happened to pass only because directory scanning collects tests/integration/
+before tests/unit/ alphabetically, installing the capable stub first;
+running specific files together in the other order broke it outright. This
+single, always-fully-capable stub removes that order dependency.
 """
 
 import sys
+import types
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -18,6 +39,118 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import mavlink_v2 as mav
+
+
+class DummyString:
+    """Stand-in for std_msgs.msg.String."""
+    def __init__(self):
+        self.data = ''
+
+
+# Parameter values the DummyNode below returns from get_parameter(); tests
+# that construct a real node (rather than bypassing __init__) mutate this via
+# the `ros_params` fixture before construction, e.g. to bind an ephemeral port.
+ROS_PARAM_OVERRIDES = {}
+
+
+class DummyNode:
+    """A single, fully-capable rclpy.Node stand-in, shared by every test file
+    in this suite that constructs a bridge via its real __init__ (see module
+    docstring for why this must not be a per-file, varying-capability stub).
+    """
+    def __init__(self, name):
+        self._logger = MagicMock()
+        self._name = name
+
+    def declare_parameter(self, name, default=None):
+        ROS_PARAM_OVERRIDES.setdefault(name, default)
+
+    def get_parameter(self, name):
+        value = ROS_PARAM_OVERRIDES.get(name)
+        m = MagicMock()
+        m.value = value
+        m.get_parameter_value.return_value.string_value = value if isinstance(value, str) else ''
+        m.get_parameter_value.return_value.string_array_value = value if isinstance(value, list) else []
+        return m
+
+    def create_publisher(self, msg_type, topic, qos):
+        return MagicMock()
+
+    def create_subscription(self, msg_type, topic, callback, qos):
+        return MagicMock()
+
+    def create_timer(self, period, callback):
+        return MagicMock()
+
+    def create_client(self, srv_type, srv_name):
+        return MagicMock()
+
+    def get_logger(self):
+        return self._logger
+
+    def destroy_node(self):
+        pass
+
+
+def _install_ros_stubs():
+    """Install rclpy/std_msgs/px4_msgs stubs exactly once per session."""
+    if getattr(sys.modules.get('rclpy'), '_praetorian_stub', False):
+        return
+
+    rclpy_mock = MagicMock()
+    rclpy_mock._praetorian_stub = True
+    rclpy_mock.node.Node = DummyNode
+    rclpy_mock.ok.return_value = True
+    sys.modules['rclpy'] = rclpy_mock
+    sys.modules['rclpy.node'] = rclpy_mock.node
+    sys.modules['rclpy.qos'] = MagicMock()
+
+    std_msgs_mock = MagicMock()
+    std_msgs_mock.String = DummyString
+    sys.modules['std_msgs'] = MagicMock()
+    sys.modules['std_msgs.msg'] = std_msgs_mock
+
+    # std_srvs/Trigger — used by emergency_wipe_mavlink_bridge. Provide a real
+    # Trigger class with Request/Response so tests can construct genuine
+    # responses (success:bool, message:str) rather than opaque mocks.
+    class TriggerRequest:
+        pass
+
+    class TriggerResponse:
+        def __init__(self):
+            self.success = False
+            self.message = ''
+
+    class Trigger:
+        Request = TriggerRequest
+        Response = TriggerResponse
+
+    std_srvs_srv_mock = types.ModuleType('std_srvs.srv')
+    std_srvs_srv_mock.Trigger = Trigger
+    sys.modules['std_srvs'] = types.ModuleType('std_srvs')
+    sys.modules['std_srvs.srv'] = std_srvs_srv_mock
+
+    px4_msgs_mock = types.ModuleType('px4_msgs.msg')
+    for name in ('VehicleLocalPosition', 'VehicleAttitude', 'VehicleStatus',
+                 'BatteryStatus', 'SensorGps', 'ObstacleDistance'):
+        setattr(px4_msgs_mock, name, type(name, (), {}))
+    sys.modules['px4_msgs'] = types.ModuleType('px4_msgs')
+    sys.modules['px4_msgs.msg'] = px4_msgs_mock
+
+
+_install_ros_stubs()
+
+
+@pytest.fixture
+def ros_params():
+    """Mutable dict of parameter overrides consumed by DummyNode.get_parameter.
+    Depend on this fixture and populate it before constructing a real node,
+    e.g.: `ros_params.update({'mavlink_port': qgc_listener.getsockname()[1]})`.
+    Cleared before and after each test so values never leak between tests.
+    """
+    ROS_PARAM_OVERRIDES.clear()
+    yield ROS_PARAM_OVERRIDES
+    ROS_PARAM_OVERRIDES.clear()
 
 
 class MAVLinkBuilder:

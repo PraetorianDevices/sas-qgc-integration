@@ -21,64 +21,15 @@ import json
 import socket
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-
-_PARAM_VALUES = {
-    'system_id': 1,
-    'component_id': 200,
-    'mavlink_host': 'localhost',
-    'mavlink_port': 0,
-}
-
-
-def _install_ros_stubs():
-    if 'gps_spoof_mavlink_bridge' in sys.modules:
-        return
-
-    class _DummyString:
-        def __init__(self):
-            self.data = ''
-
-    class _DummyNode:
-        def __init__(self, name):
-            self._logger = MagicMock()
-
-        def declare_parameter(self, name, default=None):
-            pass
-
-        def get_parameter(self, name):
-            m = MagicMock()
-            m.value = _PARAM_VALUES.get(name)
-            return m
-
-        def create_subscription(self, msg_type, topic, callback, qos):
-            return MagicMock()
-
-        def get_logger(self):
-            return self._logger
-
-        def destroy_node(self):
-            pass
-
-    rclpy_mock = MagicMock()
-    rclpy_mock.node.Node = _DummyNode
-    sys.modules['rclpy'] = rclpy_mock
-    sys.modules['rclpy.node'] = rclpy_mock.node
-    sys.modules['rclpy.qos'] = MagicMock()
-
-    std_msgs_mock = MagicMock()
-    std_msgs_mock.String = _DummyString
-    sys.modules['std_msgs'] = MagicMock()
-    sys.modules['std_msgs.msg'] = std_msgs_mock
-
-
-_install_ros_stubs()
-
+# rclpy/std_msgs stubs are installed once in tests/conftest.py, shared across
+# every test file -- see that module's docstring for why a per-file stub here
+# would be unsafe (gps_spoof_mavlink_bridge.py is also imported by
+# tests/unit/test_mavlink_crc.py).
 import mavlink_v2 as mav
 from gps_spoof_mavlink_bridge import GPSSpoofMAVLinkBridge, MAVSeverity
 
@@ -99,9 +50,14 @@ def qgc_listener():
 
 
 @pytest.fixture
-def bridge(qgc_listener):
+def bridge(qgc_listener, ros_params):
     """A real GPSSpoofMAVLinkBridge, connected to the qgc_listener socket."""
-    _PARAM_VALUES['mavlink_port'] = qgc_listener.getsockname()[1]
+    ros_params.update({
+        'system_id': 1,
+        'component_id': 200,
+        'mavlink_host': 'localhost',
+        'mavlink_port': qgc_listener.getsockname()[1],
+    })
     b = GPSSpoofMAVLinkBridge()
     yield b
     if b._socket is not None:

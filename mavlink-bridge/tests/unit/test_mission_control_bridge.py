@@ -21,40 +21,16 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-# -----------------------------------------------------------------------------
-# ROS2 / std_msgs stubs — mission_control_bridge.py imports rclpy at module
-# level, which isn't installed outside a ROS 2 environment. Stub just enough
-# for the module (and MissionControlBridge.__new__, which bypasses __init__
-# entirely) to import cleanly.
-# -----------------------------------------------------------------------------
+# rclpy/std_msgs stubs are installed once in tests/conftest.py, shared across
+# every test file -- see that module's docstring for why a per-file stub here
+# would be unsafe (mission_control_bridge.py is also imported by
+# tests/integration/test_mission_control_integration.py, which needs a
+# fully-functional stub, not the minimal one this file used to install).
 
 class _DummyString:
     def __init__(self):
         self.data = ''
 
-
-def _install_ros_stubs() -> None:
-    if 'mission_control_bridge' in sys.modules:
-        return  # already imported (e.g. re-run in the same session)
-
-    rclpy_mock = MagicMock()
-    rclpy_mock.node.Node = object
-
-    qos_mock = MagicMock()
-    for name in ('QoSProfile', 'ReliabilityPolicy', 'HistoryPolicy', 'DurabilityPolicy'):
-        setattr(qos_mock, name, MagicMock())
-
-    std_msgs_mock = MagicMock()
-    std_msgs_mock.String = _DummyString
-
-    sys.modules['rclpy'] = rclpy_mock
-    sys.modules['rclpy.node'] = rclpy_mock.node
-    sys.modules['rclpy.qos'] = qos_mock
-    sys.modules['std_msgs'] = MagicMock()
-    sys.modules['std_msgs.msg'] = std_msgs_mock
-
-
-_install_ros_stubs()
 
 from mission_control_bridge import MissionControlBridge  # noqa: E402
 import mavlink_v2 as mav  # noqa: E402
