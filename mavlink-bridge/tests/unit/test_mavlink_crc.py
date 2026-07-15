@@ -223,5 +223,38 @@ class TestGpsSpoofAlertPipelineReal:
             assert mav.parse_frame(frame).valid
 
 
+class TestSeverityMatchesMavlinkSpec:
+    """Regression test for the transposed MAVSeverity enum: INFO/EMERGENCY and
+    ALERT/CRITICAL were swapped, so a genuine CRITICAL spoof alert transmitted
+    at NOTICE priority (5) and an INFO alert at EMERGENCY priority (0) --
+    backwards from QGC's severity-based color coding. Pins the actual
+    MAV_SEVERITY wire values (not just relative ordering), since the other
+    tests in this file compare against MAVSeverity symbolically and would not
+    have caught this."""
+
+    def test_severity_values_match_mav_severity_spec(self):
+        assert int(MAVSeverity.EMERGENCY) == 0
+        assert int(MAVSeverity.ALERT) == 1
+        assert int(MAVSeverity.CRITICAL) == 2
+        assert int(MAVSeverity.ERROR) == 3
+        assert int(MAVSeverity.WARNING) == 4
+        assert int(MAVSeverity.NOTICE) == 5
+        assert int(MAVSeverity.INFO) == 6
+
+    def test_critical_alert_transmits_at_severity_2_on_the_wire(self):
+        bridge = _make_bridge()
+        sent = _capture_socket(bridge)
+        bridge._cb_gps_spoof_alert(_alert_msg(level='CRITICAL', state='SPOOFING_DETECTED'))
+        parsed = mav.parse_frame(sent[0])
+        assert parsed.payload[0] == 2  # MAV_SEVERITY_CRITICAL, not the old (wrong) 5
+
+    def test_info_alert_transmits_at_severity_6_on_the_wire(self):
+        bridge = _make_bridge()
+        sent = _capture_socket(bridge)
+        bridge._cb_gps_spoof_alert(_alert_msg(level='INFO', state='NOMINAL'))
+        parsed = mav.parse_frame(sent[0])
+        assert parsed.payload[0] == 6  # MAV_SEVERITY_INFO, not the old (wrong) 0
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

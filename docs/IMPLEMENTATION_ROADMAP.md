@@ -88,7 +88,7 @@ Built directly on the corrected `mavlink_v2.py`, following the Phase 0 pattern: 
 - **Inbound-port limitation (see Notes #7 and IMPLEMENTATION_STATUS Known Limitations):** the outbound bridges (gps_spoof, telemetry, fleet, collision) only `connect()`/send, so they share port 14550 fine; but `mission_control_bridge` and `emergency_wipe_bridge` both need to BIND to receive, and two processes can't cleanly bind one UDP port. The wipe bridge therefore defaults to a separate `wipe_port` (14556). A single-vehicle QGC link can't reach two ports, so production needs a MAVLink router / single inbound demux.
 - DDS-Security enclaves for these new nodes still need generating (`ros2 security create_enclave`) before launching under `ROS_SECURITY_STRATEGY=Enforce`.
 
-**Result:** full mavlink-bridge suite is now **173 tests passed, zero exclusions** (was 125).
+**Result:** full mavlink-bridge suite is now **176 tests passed, zero exclusions** (was 125).
 
 ---
 
@@ -119,7 +119,7 @@ Built directly on the corrected `mavlink_v2.py`, following the Phase 0 pattern: 
 | Collision Bridge | 7 unit + 3 integration | ✅ Yes (real bridge, real UDP socket, pymavlink round-trip) | ✅ Done (Phase 2) |
 | Emergency Wipe Bridge | 14 unit + 4 integration | ✅ Yes (real bound socket + real receiver thread) | ✅ Done (Phase 2) |
 
-**Totals:** mavlink-bridge suite 173/173 passing (zero exclusions); SAS unit suite 1215/1215 passing (3 pre-existing skips).
+**Totals:** mavlink-bridge suite 176/176 passing (zero exclusions); SAS unit suite 1215/1215 passing (3 pre-existing skips).
 
 ### Test Verification vs SAS Repo
 
@@ -156,7 +156,7 @@ mavlink-bridge/
 ├── fleet_manager_mavlink_bridge.py     ✅ Phase 2: /fleet/status → STATUSTEXT summaries
 ├── collision_mavlink_bridge.py         ✅ Phase 2: ObstacleDistance → OBSTACLE_DISTANCE
 ├── emergency_wipe_mavlink_bridge.py    ✅ Phase 2: COMMAND_LONG → wipe service (two-factor gated)
-└── tests/                              ✅ 173 tests, all import real modules
+└── tests/                              ✅ 176 tests, all import real modules
 
 SAS/
 ├── security/mission_signer.py          ✅ correct
@@ -204,4 +204,4 @@ mavlink-bridge/
 5. **Test-suite order dependency, found and fixed:** five mavlink-bridge test files each installed their own competing ROS 2 stub into `sys.modules`; whichever loaded first silently won for the rest of the process, so `pytest tests/` passing 124/124 was masking a real fragility that surfaced the moment tests were run in a different order (e.g. unit file before its integration counterpart), raising `TypeError: object.__init__() takes exactly one argument`. Fixed by consolidating all ROS 2 stubbing into a single always-fully-capable stub in `tests/conftest.py`, which pytest loads before any test module regardless of selection/order. See `IMPLEMENTATION_STATUS.md` Part 2 for detail.
 6. **Two more quick fixes, found and fixed:** `_get_battery_voltage()` in `telemetry_mavlink_bridge.py` divided an already-in-volts cell-voltage sum by 1000 again, reporting SYS_STATUS battery voltage ~1000x too low — fixed, with a new regression test. Separately, `mavlink-bridge/setup.py`'s dead `test_gps_spoof_alert_generator` console_scripts entry now points at a real file — a standalone CLI tool that publishes synthetic `/gps_spoof_alert` messages for the manual QGC testing phases in `INTEGRATION_TEST_CHECKLIST.md`. A root-level `mavlink-bridge/conftest.py` (`collect_ignore`) keeps pytest from trying to collect that script as a test module, since its name is fixed by the entry point and can't be changed to avoid matching pytest's `test_*.py` discovery pattern.
 7. **Inbound single-UDP-port limitation (Phase 2, documented not resolved):** each bridge is its own process with its own socket. Outbound bridges only `connect()`/send, so any number share the QGC port (14550). But `mission_control_bridge` and the new `emergency_wipe_bridge` both `bind()` to receive, and two processes can't cleanly bind one UDP port — so the wipe bridge defaults to a separate `wipe_port` (14556). Because QGC uses one comm link per vehicle, a real deployment needs a MAVLink router / single inbound demultiplexer to fan one inbound stream to both inbound bridges. Not a code bug in any single bridge; a system-integration item.
-8. **gps_spoof_mavlink_bridge severity numbering is transposed (found in Phase 2, not yet fixed):** its `MAVSeverity` enum has `INFO = 0` (really EMERGENCY in MAV_SEVERITY) and `CRITICAL = 5` (really NOTICE), so a genuine CRITICAL spoof alert is transmitted at NOTICE priority and an INFO alert at EMERGENCY — backwards in QGC's color-coding. The Phase 2 fleet and emergency-wipe bridges deliberately use spec-correct MAV_SEVERITY values instead. Fixing gps_spoof means updating its enum plus its tests and `demo_qgc_wire_protocol.py`; left as a flagged follow-up rather than silently expanding Phase 2 scope.
+8. **gps_spoof_mavlink_bridge severity numbering was transposed, found and fixed:** its `MAVSeverity` enum had `INFO = 0` (really EMERGENCY in MAV_SEVERITY) and `CRITICAL = 5` (really NOTICE), so a genuine CRITICAL spoof alert transmitted at NOTICE priority and an INFO alert at EMERGENCY — backwards in QGC's color-coding. Fixed to the spec-correct values (matching the fleet/emergency-wipe bridges' enums). Every call site in the bridge and its tests referenced the enum symbolically, so no other code needed to change; added `TestSeverityMatchesMavlinkSpec` to `test_mavlink_crc.py` to pin the actual wire values going forward.

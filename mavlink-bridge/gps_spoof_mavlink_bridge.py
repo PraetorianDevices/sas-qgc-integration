@@ -11,9 +11,9 @@ framing, sequence numbering, and system/component IDs.
 
 Alert Level Mapping
 -------------------
-  INFO     → MAV_SEVERITY_INFO (0)
+  INFO     → MAV_SEVERITY_INFO (6)
   WARNING  → MAV_SEVERITY_WARNING (4)
-  CRITICAL → MAV_SEVERITY_CRITICAL (5)
+  CRITICAL → MAV_SEVERITY_CRITICAL (2)
 
 State Mapping
 -----------
@@ -36,14 +36,24 @@ import mavlink_v2 as mav
 
 
 class MAVSeverity(IntEnum):
-    """MAVLink message severity levels."""
-    INFO     = 0
-    NOTICE   = 1
-    WARNING  = 4
-    ERROR    = 3
-    CRITICAL = 5
-    ALERT    = 2
-    EMERGENCY = 6
+    """MAV_SEVERITY, per the MAVLink common spec (lower = more severe).
+
+    This enum previously had its values transposed (INFO=0, CRITICAL=5,
+    ALERT=2, EMERGENCY=6 -- i.e. INFO and EMERGENCY were swapped, and ALERT
+    and CRITICAL were swapped), so a genuine CRITICAL spoofing alert was
+    transmitted at NOTICE priority and an INFO alert at EMERGENCY priority --
+    backwards from what QGC's severity-based color coding expects. Fixed to
+    the real MAV_SEVERITY values, matching fleet_manager_mavlink_bridge.py and
+    emergency_wipe_mavlink_bridge.py.
+    """
+    EMERGENCY = 0
+    ALERT = 1
+    CRITICAL = 2
+    ERROR = 3
+    WARNING = 4
+    NOTICE = 5
+    INFO = 6
+    DEBUG = 7
 
 
 class MAVFrameType(IntEnum):
