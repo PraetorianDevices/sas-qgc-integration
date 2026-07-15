@@ -1,7 +1,7 @@
 # SAS-QGC Integration: Implementation Status Report
 
 **Last Updated:** 2026-07-14
-**Overall Status:** Phases 0, 1, 1.5, and 2 are complete. All six bridges are verified against pymavlink, mission signing is wired into the live upload path, secure_launch.py is fixed, and the entire mavlink-bridge test suite (176 tests) imports and exercises real production code. Phase 2 (Fleet Manager / Collision / Emergency Wipe bridges) is now done; Phase 3 (QGC plugin) remains not started, and no phase has yet been validated against live QGroundControl/PX4 hardware.
+**Overall Status:** Phases 0, 1, 1.5, and 2 are complete. All six bridges are verified against pymavlink, mission signing is wired into the live upload path, secure_launch.py is fixed, and the entire mavlink-bridge test suite (197 tests) imports and exercises real production code. Phase 2 (Fleet Manager / Collision / Emergency Wipe bridges) is now done, and the inbound single-UDP-port limitation it introduced is resolved via `mavlink_router_node.py`. Phase 3 (QGC plugin) remains not started, and no phase has yet been validated against live QGroundControl/PX4 hardware.
 
 **Branch note:** all of this work lives on `develop` in both the outer repo and the `SAS` submodule (each has its own `develop`). 
 
@@ -18,6 +18,7 @@
 | `fleet_manager_mavlink_bridge.py` (Phase 2) | ✅ Uses `mavlink_v2` | ✅ STATUSTEXT per-drone mission-state/progress summaries from `/fleet/status`, de-duplicated | ✅ Via shared codec + real UDP-socket integration tests | ✅ **DONE** |
 | `collision_mavlink_bridge.py` (Phase 2) | ✅ Uses `mavlink_v2` | ✅ OBSTACLE_DISTANCE (330), new codec message verified byte-for-byte; near 1:1 forward of the SF45 sweep from `/fmu/in/obstacle_distance` | ✅ Via shared codec + real UDP-socket + pymavlink round-trip | ✅ **DONE** |
 | `emergency_wipe_mavlink_bridge.py` (Phase 2) | ✅ Uses `mavlink_v2` | ✅ COMMAND_LONG (76) parse + COMMAND_ACK (77) build, new codec messages verified byte-for-byte; two-factor gate before calling the wipe service | ✅ Via shared codec + real bound-socket + real receiver-thread integration tests | ✅ **DONE** |
+| `mavlink_router_node.py` (Phase 2, inbound-port fix) | N/A — pure byte relay, no MAVLink parsing | ✅ Fans QGC's single external UDP link out to `mission_control_bridge`'s and `emergency_wipe_bridge`'s internal ports, and relays their replies back; neither bridge needed a code change | ✅ Real 3-node topology test (real router + real mission_control_bridge + real emergency_wipe_bridge, one simulated QGC socket) | ✅ **DONE** |
 
 ### Bugs found and fixed during the telemetry/mission-control migration (beyond the frame header itself)
 
@@ -27,6 +28,7 @@
 - **`mission_control_bridge.py`:** `MAVLINK_MSG_ID_MISSION_ITEM_REACHED` was hardcoded as `61`; the real ID is `46`. Fixed by switching to `mavlink_v2`'s verified constants.
 - **`mavlink_v2.py` (caught by testing, not shipped):** `parse_mission_ack`/`parse_mission_count`/`parse_mission_request` originally rejected payloads shorter than their un-truncated size, but MAVLink 2's trailing-zero-truncation rule means a `MISSION_ACK(result=ACCEPTED)` or an empty `MISSION_COUNT(0)` legitimately arrives shorter. Fixed to zero-fill, matching the same fix already applied to `parse_mission_item_int`.
 - **`gps_spoof_mavlink_bridge.py`:** its `MAVSeverity` enum had INFO/EMERGENCY and ALERT/CRITICAL transposed (`INFO=0`, `CRITICAL=5`, `ALERT=2`, `EMERGENCY=6`, instead of the real MAV_SEVERITY values), so a genuine CRITICAL spoofing alert transmitted at NOTICE priority and an INFO alert at EMERGENCY priority — backwards from QGC's severity-based color coding. Found while building Phase 2's spec-correct severity enums for the fleet/wipe bridges. **Fixed** — all usages in the bridge and its tests referenced the enum symbolically (`MAVSeverity.CRITICAL` etc.), not raw integers, so correcting the values required no other code changes; added `TestSeverityMatchesMavlinkSpec` to `test_mavlink_crc.py` pinning the actual wire values, since the existing tests only checked relative consistency.
+- **Inbound single-UDP-port limitation (Phase 2 follow-up), resolved:** `mission_control_bridge` and `emergency_wipe_bridge` both need to bind a socket to receive, but QGC uses one UDP comm link per vehicle and two processes can't cleanly bind the same port. Resolved with a new `mavlink_router_node.py`: it binds the single external port QGC's comm link targets and fans every inbound datagram, byte-for-byte, out to both bridges' own internal ports, relaying their replies back to whichever address most recently contacted the external socket. **Neither existing bridge needed any code change** — both already bind whatever port they're configured with and dynamically learn their reply address from the sender of the last packet they received; pointed at the router instead of directly at QGC, that pre-existing mechanism keeps working unmodified. Verified with a real 3-node topology test: real router + real `MissionControlBridge` + real `EmergencyWipeMAVLinkBridge`, all reachable from one simulated QGC socket, confirming both a `MISSION_COUNT`→`MISSION_ACK` roundtrip and a `COMMAND_LONG`→`COMMAND_ACK` roundtrip through the same link.
 
 ---
 
@@ -46,8 +48,11 @@ Every mavlink-bridge test file now imports and exercises its corresponding produ
 | `test_fleet_manager_bridge.py` + `test_fleet_manager_integration.py` (Phase 2) | 13 + 3 | Real `FleetManagerMAVLinkBridge`; double-encoded `/fleet/status` parsing, per-drone STATUSTEXT, de-duplication, severity mapping, real UDP socket. |
 | `test_collision_bridge.py` + `test_collision_integration.py` (Phase 2) | 7 + 3 | Real `CollisionMAVLinkBridge`; ObstacleDistance→OBSTACLE_DISTANCE, distances survive the wire (pymavlink round-trip), real UDP socket. |
 | `test_emergency_wipe_bridge.py` + `test_emergency_wipe_integration.py` (Phase 2) | 14 + 4 | Real `EmergencyWipeMAVLinkBridge`; two-factor gate (accept/deny/temporarily-reject), command filtering, CRC rejection, reply addressing over a real bound socket + real receiver thread. |
+| `test_mavlink_router.py` (Phase 2, inbound-port fix) | 12 | Real `MAVLinkRouterNode`'s pure relay logic (`_forward_to_downstream`, `_relay_to_qgc`, `parse_targets`) with fake sockets. |
+| `test_mavlink_router_integration.py` (Phase 2, inbound-port fix) | 4 | Real router, real UDP sockets, simulated QGC + simulated downstream-bridge endpoints: fan-out, reply relay, no-relay-before-first-inbound-frame, ordering. |
+| `test_router_with_real_bridges_integration.py` (Phase 2, inbound-port fix) | 5 | The crown-jewel test: real router + real `MissionControlBridge` + real `EmergencyWipeMAVLinkBridge`, all reachable from ONE simulated QGC socket — the definitive proof the inbound single-UDP-port limitation is resolved. |
 
-**Full mavlink-bridge suite: 176 tests passed, zero exclusions** (previously, `test_mavlink_crc.py` had to be excluded because it required a real ROS 2 environment; that's no longer true). Full SAS unit suite: 1215 passed, 3 skipped — unaffected by this work.
+**Full mavlink-bridge suite: 197 tests passed, zero exclusions** (previously, `test_mavlink_crc.py` had to be excluded because it required a real ROS 2 environment; that's no longer true). Full SAS unit suite: 1215 passed, 3 skipped — unaffected by this work.
 
 **Test-suite order dependency, found and fixed:** `test_mavlink_crc.py`, `test_gps_spoof_integration.py`, `test_mission_control_bridge.py`, `test_mission_control_integration.py`, and `test_telemetry_conversion.py` each installed their own competing `rclpy`/`std_msgs`/`px4_msgs` stub into `sys.modules`. Because a module's class body only executes once and gets cached, whichever file's stub loaded first "won" for the rest of the process — `pytest tests/` (124 passed) only worked because directory scanning collects `tests/integration/` before `tests/unit/` alphabetically, loading the fully-capable stub first. Running unit-before-integration explicitly (e.g. `pytest tests/unit/test_mission_control_bridge.py tests/integration/test_mission_control_integration.py`) raised `TypeError: object.__init__() takes exactly one argument` — a latent fragility the full-directory run was silently masking. Fixed by consolidating all stubbing into a single, always-fully-capable stub in `tests/conftest.py` (with a new `ros_params` fixture for integration tests to configure e.g. ephemeral ports before construction), which pytest always imports first regardless of file selection or order. Verified with several non-default orderings (unit-first, integration-first, mixed) — all 124 tests now pass in every ordering tried.
 
@@ -94,25 +99,24 @@ While tracing mission-completion signaling for the MAVLink bridges, a real, unre
 - ✅ Gesture safety gating — fully implemented and tested.
 - ✅ Emergency-wipe trigger — gated behind a two-factor (magic-param + confirmation) check in the bridge, since the underlying Trigger service has no auth of its own.
 - ✅ `secure_launch.py` — correct SROS2 environment variables (still needs enclaves generated for the bridge nodes before it fully covers them).
-- ✅ Full mavlink-bridge test suite (176 tests) and SAS unit suite (1215 tests) — all importing and exercising real code.
+- ✅ Full mavlink-bridge test suite (197 tests) and SAS unit suite (1215 tests) — all importing and exercising real code.
+- ✅ `mavlink-bridge/mavlink_router_node.py` (new) — fans QGC's single UDP comm link out to both inbound bridges (`mission_control_bridge`, `emergency_wipe_bridge`), resolving the inbound single-UDP-port limitation with no code changes to either bridge. See Part 1's bugs-found-and-fixed list for detail.
 - ✅ `mavlink-bridge/demo_qgc_wire_protocol.py` (new) — a no-ROS-2, no-QGC-required live demo: the real `GPSSpoofMAVLinkBridge._send_statustext` sends genuine frames over a real UDP socket, decoded live by `pymavlink` (the same reference implementation QGC's own parser is built on). Useful both as a demo and as a fast local sanity check of the wire protocol.
 - ✅ `mavlink-bridge/test_gps_spoof_alert_generator.py` (new) — the console script `setup.py` referenced but didn't have; publishes synthetic `/gps_spoof_alert` messages for manual QGC testing (checklist Phases 5.2/5.4/7.1).
 
 ## What Is NOT Ready
 
-- ⏳ DDS-Security enclaves for the 6 mavlink-bridge nodes — not generated (requires `ros2 security` CLI in a real ROS 2 environment).
-- ⏳ Single inbound UDP demux — `mission_control_bridge` and `emergency_wipe_bridge` both bind to receive and can't share one port; the wipe bridge is on a separate `wipe_port` (14556) pending a MAVLink router (see Known Limitations #5).
+- ⏳ DDS-Security enclaves for the 7 mavlink-bridge nodes — not generated (requires `ros2 security` CLI in a real ROS 2 environment).
 - ⏳ QGC Custom Plugin (Phase 3) — not started, requires C++/Qt/QML.
-- ⏳ Live ROS 2/WSL validation — everything above has been verified via unit/integration tests and real-socket simulation in this environment, but not yet run against a live ROS 2 install, real PX4/QGC, or real hardware.
+- ⏳ Live ROS 2/WSL validation — everything above has been verified via unit/integration tests and real-socket simulation in this environment, but not yet run against a live ROS 2 install, real PX4/QGC, or real hardware. This now includes the router topology: verified with a real 3-node test in this environment, but never against real QGroundControl.
 
 ---
 
 ## Immediate Next Steps (Priority Order)
 
-1. **Live ROS 2 validation.** Launch the full bridge stack in WSL against a real QGroundControl instance and a PX4 SITL or real vehicle — everything to this point has been verified via unit tests, byte-for-byte pymavlink comparison, and real-socket simulation (plus, now, a live pymavlink-decoded UDP demo), but never against the actual external systems it's meant to interoperate with.
-2. Resolve the inbound single-UDP-port limitation (MAVLink router / single inbound demux) so both inbound bridges can share one QGC link.
-3. Generate DDS-Security enclaves for the 6 mavlink-bridge nodes via `ros2 security create_enclave`.
-4. Phase 3: QGC Custom Plugin (separate session, C++/Qt/QML).
+1. **Live ROS 2 validation.** Launch the full bridge stack (now including `mavlink_router_node`) in WSL against a real QGroundControl instance and a PX4 SITL or real vehicle — everything to this point has been verified via unit tests, byte-for-byte pymavlink comparison, and real-socket simulation (plus, now, a live pymavlink-decoded UDP demo and a real 3-node router topology test), but never against the actual external systems it's meant to interoperate with.
+2. Generate DDS-Security enclaves for the 7 mavlink-bridge nodes via `ros2 security create_enclave`.
+3. Phase 3: QGC Custom Plugin (separate session, C++/Qt/QML).
 
 ---
 
@@ -122,4 +126,3 @@ While tracing mission-completion signaling for the MAVLink bridges, a real, unre
 2. **DDS-Security:** the pre-existing keystore does not cover the mavlink-bridge nodes; needs new enclaves.
 3. **QGC Plugin:** requires C++/Qt/QML, not attempted in any session so far.
 4. **No live validation yet:** all verification to date is unit/integration-level (pymavlink byte comparison, real sockets, real crypto) — not yet run against real QGroundControl, PX4, or hardware.
-5. **Inbound single-UDP-port limitation (Phase 2):** each bridge is its own process/socket. Outbound bridges only send, so they share port 14550; but `mission_control_bridge` and `emergency_wipe_bridge` both `bind()` to receive, and two processes can't cleanly bind one UDP port. The wipe bridge defaults to a separate `wipe_port` (14556). QGC uses one comm link per vehicle, so production needs a MAVLink router / single inbound demux to reach both inbound bridges over one link.
