@@ -8,29 +8,40 @@ Launches the full MAVLink bridge stack for SAS-QGC integration:
   3. Mission Control (bidirectional waypoint upload/download)
   4. Fleet Manager → MAVLink STATUSTEXT (per-drone mission-state summaries)
   5. Collision (SF45 obstacle sweep) → MAVLink OBSTACLE_DISTANCE
-  6. Emergency Wipe (MAVLink COMMAND_LONG → wipe service) — see port note below
+  6. Emergency Wipe (MAVLink COMMAND_LONG → wipe service)
+  7. MAVLink Router — fans the single QGC UDP link out to both inbound bridges
 
 Outbound bridges (gps_spoof, telemetry, fleet, collision) `connect()` and only
 SEND, so any number of them share the QGC port (14550) fine. INBOUND bridges
-BIND the port to receive, and two processes cannot cleanly bind the same UDP
-port. mission_control_bridge already binds `mavlink_port` (14550); the emergency
-wipe bridge therefore listens on a SEPARATE `wipe_port` (default 14556) here.
+(mission_control, emergency_wipe) each need to BIND a socket to receive, and
+two processes cannot cleanly bind the same UDP port — but QGC uses a single
+UDP comm link per vehicle, so both must somehow be reachable on that one link.
 
-  ⚠️ Known limitation: because QGC uses a single UDP comm link per vehicle,
-  reaching the wipe bridge on a different port requires either a second QGC
-  comm link aimed at wipe_port, or a MAVLink router / single inbound
-  demultiplexer that fans one inbound stream out to both inbound bridges. The
-  per-message-type one-socket-per-process design does not multiplex inbound on
-  one port. Documented in IMPLEMENTATION_STATUS.md Known Limitations.
+Resolved via mavlink_router_node: it binds the single external port QGC's
+comm link targets (`mavlink_port`, 14550) and fans every inbound datagram out
+to both inbound bridges, each now listening on its own internal port
+(`mission_control_listen_port` 14551, `wipe_port` 14556) instead of the shared
+external one. Neither bridge needed any code change for this -- both already
+bind whatever port they're configured with and learn their reply address
+dynamically from whoever last contacted them, so pointed at the router
+instead of directly at QGC, that existing mechanism keeps working unmodified.
+See mavlink_router_node.py's module docstring for the full design, and
+IMPLEMENTATION_STATUS.md (this limitation is now resolved, not just documented).
 
 Usage:
   ros2 launch mavlink-bridge launch_sas_qgc_integration.py system_id:=1
 
 Parameters:
-  system_id    : MAVLink system ID (1-255, default 1)
-  drone_id     : ROS 2 namespace for multi-drone (default empty for single drone)
-  mavlink_port : UDP port for QGC telemetry/mission (default 14550)
-  wipe_port    : UDP port the emergency-wipe bridge binds (default 14556)
+  system_id                   : MAVLink system ID (1-255, default 1)
+  drone_id                    : ROS 2 namespace for multi-drone (default empty for single drone)
+  mavlink_port                : the single external UDP port QGC's comm link targets (default 14550) -- only mavlink_router_node binds this
+  mission_control_listen_port : internal port mission_control_bridge binds, behind the router (default 14551)
+  wipe_port                   : internal port emergency_wipe_bridge binds, behind the router (default 14556)
+  router_downstream_port      : internal port mavlink_router_node itself binds to talk to both inbound bridges (default 14559)
+
+  ⚠️ If you override mission_control_listen_port or wipe_port, you must also
+  update mavlink_router_node's `downstream_targets` parameter below to match --
+  it is not derived automatically from the other launch arguments.
 
 Expected Telemetry in QGC:
   - HEARTBEAT: Vehicle armed/disarmed status
@@ -64,7 +75,9 @@ def generate_launch_description():
     mavlink_port_arg = DeclareLaunchArgument(
         'mavlink_port',
         default_value='14550',
-        description='UDP port for QGC telemetry (default 14550)'
+        description='Single external UDP port QGC\'s comm link targets. Only '
+                    'mavlink_router_node binds this; mission_control and '
+                    'emergency_wipe are behind it on their own internal ports.'
     )
 
     mavlink_host_arg = DeclareLaunchArgument(
@@ -73,11 +86,23 @@ def generate_launch_description():
         description='Host for QGC connection'
     )
 
+    mission_control_listen_port_arg = DeclareLaunchArgument(
+        'mission_control_listen_port',
+        default_value='14551',
+        description='Internal port mission_control_bridge binds, behind the router'
+    )
+
     wipe_port_arg = DeclareLaunchArgument(
         'wipe_port',
         default_value='14556',
-        description='UDP port the emergency-wipe bridge binds (separate from '
-                    'mavlink_port, which mission_control already binds)'
+        description='Internal port emergency_wipe_bridge binds, behind the router'
+    )
+
+    router_downstream_port_arg = DeclareLaunchArgument(
+        'router_downstream_port',
+        default_value='14559',
+        description='Internal port mavlink_router_node itself binds to talk '
+                    'to both inbound bridges'
     )
 
     # ===== GPS Spoofing Detector Node =====
@@ -120,7 +145,10 @@ def generate_launch_description():
         output='screen'
     )
 
-    # ===== Mission Control Bridge =====
+    # ===== Mission Control Bridge (INBOUND: MISSION_COUNT/ITEM_INT/etc.) =====
+    # Binds mission_control_listen_port -- NOT the external mavlink_port --
+    # since mavlink_router_node owns the external port and fans inbound
+    # traffic to this bridge's internal port instead.
     mission_bridge = Node(
         package='mavlink-bridge',
         executable='mission_control_bridge',
@@ -130,7 +158,7 @@ def generate_launch_description():
             {'component_id': 1},  # MAV_COMP_ID_AUTOPILOT
             {'drone_id': LaunchConfiguration('drone_id')},
             {'mavlink_host': LaunchConfiguration('mavlink_host')},
-            {'mavlink_port': LaunchConfiguration('mavlink_port')},
+            {'mavlink_port': LaunchConfiguration('mission_control_listen_port')},
         ],
         output='screen'
     )
@@ -165,8 +193,8 @@ def generate_launch_description():
     )
 
     # ===== Emergency Wipe Bridge (INBOUND COMMAND_LONG) =====
-    # Binds its own wipe_port -- NOT mavlink_port -- since mission_control_bridge
-    # already binds mavlink_port and two processes cannot share a UDP bind.
+    # Binds its own wipe_port -- NOT the external mavlink_port -- for the same
+    # reason as mission_control_bridge above: it's behind the router now.
     emergency_wipe_bridge = Node(
         package='mavlink-bridge',
         executable='emergency_wipe_mavlink_bridge',
@@ -177,6 +205,30 @@ def generate_launch_description():
             {'drone_id': LaunchConfiguration('drone_id')},
             {'mavlink_host': LaunchConfiguration('mavlink_host')},
             {'mavlink_port': LaunchConfiguration('wipe_port')},
+        ],
+        output='screen'
+    )
+
+    # ===== MAVLink Router (fans the single QGC link out to both inbound bridges) =====
+    # Binds the external mavlink_port that QGC's comm link actually targets,
+    # and forwards every inbound frame to both mission_control_bridge and
+    # emergency_wipe_bridge's internal ports. This is what makes it possible
+    # for QGC's single UDP link to reach both inbound bridges at once --
+    # resolves the previously-documented inbound single-UDP-port limitation.
+    #
+    # downstream_targets below must match mission_control_listen_port/wipe_port's
+    # defaults (14551/14556); it is not derived from those launch args
+    # automatically -- update both together if you change either default.
+    mavlink_router = Node(
+        package='mavlink-bridge',
+        executable='mavlink_router_node',
+        namespace='/',
+        parameters=[
+            {'mavlink_host': LaunchConfiguration('mavlink_host')},
+            {'mavlink_port': LaunchConfiguration('mavlink_port')},
+            {'downstream_bind_host': 'localhost'},
+            {'downstream_bind_port': LaunchConfiguration('router_downstream_port')},
+            {'downstream_targets': ['localhost:14551', 'localhost:14556']},
         ],
         output='screen'
     )
@@ -200,7 +252,16 @@ def generate_launch_description():
         '  - MISSION_CURRENT (active waypoint tracking)\n',
         '  - MISSION_ACK (mission acknowledgement)\n',
         'Alerts:\n',
-        '  - STATUSTEXT (GPS spoofing warnings/critical)\n',
+        '  - STATUSTEXT (GPS spoofing warnings/critical, fleet summaries, wipe status)\n',
+        'Fleet & Collision:\n',
+        '  - Fleet Manager -> STATUSTEXT (per-drone mission state/progress)\n',
+        '  - Collision Avoidance -> OBSTACLE_DISTANCE (SF45 sweep)\n',
+        'Emergency Wipe:\n',
+        '  - COMMAND_LONG (gated) -> COMMAND_ACK\n',
+        '\n',
+        'A single mavlink_router_node fans the one QGC UDP link out to both\n',
+        'inbound bridges (mission_control, emergency_wipe) -- see that node and\n',
+        'this file\'s docstring for the resolved single-inbound-port limitation.\n',
         '\n',
         'Connect QGC:\n',
         '  Settings -> Comm Links -> Add -> UDP\n',
@@ -213,7 +274,9 @@ def generate_launch_description():
         drone_id_arg,
         mavlink_port_arg,
         mavlink_host_arg,
+        mission_control_listen_port_arg,
         wipe_port_arg,
+        router_downstream_port_arg,
         detector_started,
         gps_bridge_started,
         telemetry_started,
@@ -224,5 +287,6 @@ def generate_launch_description():
         mission_bridge,
         fleet_manager_bridge,
         collision_bridge,
+        mavlink_router,
         emergency_wipe_bridge,
     ])

@@ -12,6 +12,7 @@ setup(
         'fleet_manager_mavlink_bridge',
         'collision_mavlink_bridge',
         'emergency_wipe_mavlink_bridge',
+        'mavlink_router_node',
     ],
     install_requires=[
         'rclpy',
@@ -26,6 +27,7 @@ setup(
             'fleet_manager_mavlink_bridge = fleet_manager_mavlink_bridge:main',
             'collision_mavlink_bridge = collision_mavlink_bridge:main',
             'emergency_wipe_mavlink_bridge = emergency_wipe_mavlink_bridge:main',
+            'mavlink_router_node = mavlink_router_node:main',
             'test_gps_spoof_alert_generator = test_gps_spoof_alert_generator:main',
         ],
     },
