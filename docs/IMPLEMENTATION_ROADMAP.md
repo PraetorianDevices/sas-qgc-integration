@@ -85,7 +85,7 @@ Built directly on the corrected `mavlink_v2.py`, following the Phase 0 pattern: 
 
 ### 2d. Launch File Update — ✅ DONE
 - **File:** `mavlink-bridge/launch_sas_qgc_integration.py` — all three new bridges added, plus `mavlink_router_node` (2e below).
-- DDS-Security enclaves for these new nodes still need generating (`ros2 security create_enclave`) before launching under `ROS_SECURITY_STRATEGY=Enforce`.
+- DDS-Security enclaves for all 7 mavlink-bridge nodes are now generated and tailored (2f below); `launch_sas_qgc_integration.py` itself doesn't yet set the `ROS_SECURITY_*` env vars, so security is available but not yet enforced for this launch file — see 2f.
 
 ### 2e. MAVLink Router (inbound single-UDP-port limitation) — ✅ DONE
 - **File:** `mavlink-bridge/mavlink_router_node.py`
@@ -95,6 +95,21 @@ Built directly on the corrected `mavlink_v2.py`, following the Phase 0 pattern: 
 - **Tests:** 12 unit (pure relay logic, fake sockets) + 4 integration (real router, simulated QGC/bridge sockets) + 5 integration (the crown-jewel test: real router + real `MissionControlBridge` + real `EmergencyWipeMAVLinkBridge`, one simulated QGC socket, proving both a `MISSION_COUNT`→`MISSION_ACK` and a `COMMAND_LONG`→`COMMAND_ACK` roundtrip through the same shared link).
 
 **Result:** full mavlink-bridge suite is now **197 tests passed, zero exclusions** (was 125 before Phase 2, 176 after the three bridges, 197 after the router).
+
+### 2f. DDS-Security Enclaves for All 7 Nodes — ✅ DONE
+- **Where:** `SAS/security/keystore/enclaves/` (gitignored — private key material, never committed; the CA and 5 pre-existing SAS enclaves already lived here).
+- **Tooling:** the first real ROS 2 environment used in this whole project — WSL Ubuntu 24.04 with ROS 2 Jazzy + `ros-jazzy-sros2` installed, invoked via `ros2 security create_enclave`/`create_permission`. (Calling `wsl.exe` with inline `$variable`-containing commands from Git Bash silently mangles the variables before they cross the Windows/WSL boundary — writing the commands to a `.sh` file first and invoking `wsl bash /path/to/script.sh`, with `MSYS_NO_PATHCONV=1` to stop MSYS from rewriting `/mnt/...` paths, is what actually works.)
+- **Enclave names:** `/gps_spoof_mavlink_bridge`, `/telemetry_mavlink_bridge`, `/mission_control_bridge`, `/fleet_manager_mavlink_bridge`, `/collision_mavlink_bridge`, `/emergency_wipe_mavlink_bridge`, `/mavlink_router_node` — matching each node's exact `super().__init__(...)` name.
+- **Tailored, not default:** `create_enclave`'s auto-generated `permissions.xml` grants a broad wildcard template (`rt/*`, `rq/*Request`, etc.) — functionally correct but broader than the 5 pre-existing SAS enclaves' least-privilege convention (each scoped to its own exact topics). Replaced with a hand-authored policy (`ros2 security create_permission <keystore> <enclave> <policy.xml>`, in the sros2 `policy.xsd` schema — a different, higher-level schema than the raw DDS-Security `permissions.xml` grant format the tool ultimately emits) listing each bridge's real topics/services, derived directly from this session's own `create_subscription`/`create_publisher`/`create_client` calls:
+  - `gps_spoof_mavlink_bridge`: subscribe `gps_spoof_alert`
+  - `telemetry_mavlink_bridge`: subscribe `fmu/out/{vehicle_local_position,vehicle_attitude,vehicle_status,battery_status,sensor_gps}`
+  - `mission_control_bridge`: publish `mission_executor/load_mission`, subscribe `mission_executor/status`
+  - `fleet_manager_mavlink_bridge`: subscribe `fleet/status`
+  - `collision_mavlink_bridge`: subscribe `fmu/in/obstacle_distance`
+  - `emergency_wipe_mavlink_bridge`: subscribe `emergency_wipe/status`; service client to `emergency_wipe/execute` (publish+subscribe `rq/.../executeRequest` and `rr/.../executeReply`, matching the existing `emergency_wipe_node` server-side enclave's exact pattern)
+  - `mavlink_router_node`: nothing — it has zero ROS topics (pure UDP relay), so its grant is just the standard `ros_discovery_info` rule every enclave gets automatically
+- **Verified, not just generated:** all 7 certs verified to chain to `identity_ca.cert.pem` via `openssl verify`; all 7 `permissions.p7s` and `governance.p7s` verified as validly-signed CMS/S-MIME messages via `openssl cms -verify` against `permissions_ca.cert.pem` (these are MIME-wrapped, base64-encoded PKCS7 SignedData, not raw DER — `-inform DER` fails even on the pre-existing, known-good enclaves, which is what first made this look like a real problem before the format was correctly identified).
+- **Not yet done:** `launch_sas_qgc_integration.py` still doesn't set `ROS_SECURITY_*` env vars, so these enclaves aren't enforced for that launch file yet — see Known Limitations.
 
 ---
 
@@ -141,10 +156,11 @@ Cross-checked and confirmed no topical redundancy between mavlink-bridge tests a
 - ✅ Phase 1.5: Gesture Safety Gating
 - ✅ Phase 2: Fleet Manager, Collision, and Emergency Wipe bridges, built on the corrected `mavlink_v2.py` (OBSTACLE_DISTANCE/COMMAND_LONG/COMMAND_ACK added and pymavlink-verified)
 - ✅ Phase 2 follow-up: inbound single-UDP-port limitation resolved via `mavlink_router_node.py`, with no code changes to either existing inbound bridge
+- ✅ Phase 2 follow-up: DDS-Security enclaves generated and tailored to least-privilege for all 7 mavlink-bridge nodes, verified cryptographically
 
 ### Now / Next
 - Live ROS 2/WSL validation against real QGroundControl and PX4 — everything to date is unit/integration-tested but not run against the actual external systems
-- Generate DDS-Security enclaves for all 7 mavlink-bridge nodes
+- Merge `secure_launch.py`'s `ROS_SECURITY_*` env vars into `launch_sas_qgc_integration.py` so the now-tailored enclaves are actually enforced for the mavlink-bridge nodes, not just present in the keystore
 
 ### Later
 - Phase 3: QGC Plugin (separate session, requires Qt/QML/C++)
@@ -169,7 +185,8 @@ mavlink-bridge/
 SAS/
 ├── security/mission_signer.py          ✅ correct
 ├── my_python_package/mission_verifier.py  ✅ correct, wired into load_mission_callback
-├── launch/secure_launch.py             ✅ correct env vars (enclaves for bridge nodes still needed)
+├── launch/secure_launch.py             ✅ correct env vars; keystore now has enclaves for all 12 SAS/mavlink-bridge nodes
+├── security/keystore/                  ✅ 7 new tailored enclaves (gitignored, not committed -- private key material)
 ├── my_python_package/fleet_manager_node.py       ✅ gesture-gated (Phase 1.5)
 ├── my_python_package/navigation_control_node.py  ✅ gesture-gated (Phase 1.5)
 └── my_python_package/mission_executor_node.py    ✅ gesture-gated (Phase 1.5) + signature verification (Phase 1)
@@ -201,7 +218,8 @@ mavlink-bridge/
 
 ### Before calling any of this "production-ready" (not yet done):
 - [ ] Full stack launched against real QGroundControl and PX4 (SITL or hardware) in a real ROS 2 environment
-- [ ] DDS-Security enclaves generated for the 7 mavlink-bridge nodes
+- [x] DDS-Security enclaves generated and tailored to least-privilege for the 7 mavlink-bridge nodes
+- [ ] Security actually enforced for `launch_sas_qgc_integration.py` (enclaves exist and verify; the launch file doesn't yet set `ROS_SECURITY_*`)
 
 ---
 
