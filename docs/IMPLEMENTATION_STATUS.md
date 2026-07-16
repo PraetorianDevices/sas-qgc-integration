@@ -98,7 +98,8 @@ While tracing mission-completion signaling for the MAVLink bridges, a real, unre
 - ✅ Mission signing — cryptographically sound and wired into the live upload path.
 - ✅ Gesture safety gating — fully implemented and tested.
 - ✅ Emergency-wipe trigger — gated behind a two-factor (magic-param + confirmation) check in the bridge, since the underlying Trigger service has no auth of its own.
-- ✅ `secure_launch.py` — correct SROS2 environment variables, and the keystore now has enclaves for all 12 SAS/mavlink-bridge nodes (see below) — though this launch file's security env vars still need merging into `launch_sas_qgc_integration.py` before security is actually enforced for the bridges.
+- ✅ `secure_launch.py` — correct SROS2 environment variables, and the keystore now has enclaves for all 12 SAS/mavlink-bridge nodes (see below).
+- ✅ **DDS-Security wired into `launch_sas_qgc_integration.py`** — a new opt-in `enable_security` launch arg (default `false`, so existing dev/test runs without a configured keystore aren't silently broken) sets the same three `ROS_SECURITY_*` vars `secure_launch.py` uses, for every node in that file (including the SAS-package `gps_spoof_detector_node`). `keystore_path` defaults to `SAS/security/keystore` resolved as a sibling directory, overridable. Verified via the real `ros2 launch` tool in WSL: with `enable_security:=true` the log correctly reports the resolved keystore path and the launch proceeds past all the new env-var/log actions (failing only on `package 'SAS' not found` — expected, since SAS/mavlink-bridge aren't colcon-installed packages in this bare ROS 2 install; that's the separate, already-flagged live-validation gap); with the default `false`, no security-related log line appears at all.
 - ✅ **DDS-Security enclaves for all 7 mavlink-bridge nodes** — generated via `ros2 security create_enclave` (WSL Ubuntu 24.04, ROS 2 Jazzy + sros2, the first real ROS 2 tooling used this project) and tailored to least-privilege via `ros2 security create_permission` with a hand-authored policy matching each bridge's actual topic/service usage (not SROS2's broad default template) — e.g. `mission_control_bridge` is scoped to publish `mission_executor/load_mission` and subscribe `mission_executor/status` only, matching the convention already used by the 5 pre-existing SAS enclaves. All 7 certs verified to chain to the identity CA and all 7 `permissions.p7s`/`governance.p7s` verified as validly-signed CMS messages via `openssl cms -verify` against the permissions CA. `mavlink_router_node` (pure UDP relay, zero ROS topics) correctly got the minimal grant (`ros_discovery_info` only).
 - ✅ Full mavlink-bridge test suite (197 tests) and SAS unit suite (1215 tests) — all importing and exercising real code.
 - ✅ `mavlink-bridge/mavlink_router_node.py` (new) — fans QGC's single UDP comm link out to both inbound bridges (`mission_control_bridge`, `emergency_wipe_bridge`), resolving the inbound single-UDP-port limitation with no code changes to either bridge. See Part 1's bugs-found-and-fixed list for detail.
@@ -107,7 +108,6 @@ While tracing mission-completion signaling for the MAVLink bridges, a real, unre
 
 ## What Is NOT Ready
 
-- ⏳ Enforcing security for the mavlink-bridge launch stack — the enclaves exist and verify correctly, but `launch_sas_qgc_integration.py` doesn't yet set the `ROS_SECURITY_*` env vars the way `secure_launch.py` does for the original 5 SAS nodes; the two launch files need merging (or the bridges relaunched under `secure_launch.py`'s environment) before security is actually enforced, not just available.
 - ⏳ QGC Custom Plugin (Phase 3) — not started, requires C++/Qt/QML.
 - ⏳ Live ROS 2/WSL validation — everything above has been verified via unit/integration tests and real-socket simulation in this environment, but not yet run against a live ROS 2 install, real PX4/QGC, or real hardware. This now includes the router topology: verified with a real 3-node test in this environment, but never against real QGroundControl.
 
@@ -115,15 +115,13 @@ While tracing mission-completion signaling for the MAVLink bridges, a real, unre
 
 ## Immediate Next Steps (Priority Order)
 
-1. **Live ROS 2 validation.** Launch the full bridge stack (now including `mavlink_router_node`) in WSL against a real QGroundControl instance and a PX4 SITL or real vehicle — everything to this point has been verified via unit tests, byte-for-byte pymavlink comparison, and real-socket simulation (plus, now, a live pymavlink-decoded UDP demo and a real 3-node router topology test), but never against the actual external systems it's meant to interoperate with.
-2. Merge `secure_launch.py`'s `ROS_SECURITY_*` environment variables into `launch_sas_qgc_integration.py` (or launch the bridges under `secure_launch.py`'s environment) so the now-generated, now-tailored enclaves actually get enforced for the mavlink-bridge nodes, not just present in the keystore.
-3. Phase 3: QGC Custom Plugin (separate session, C++/Qt/QML).
+1. **Live ROS 2 validation.** Launch the full bridge stack (now including `mavlink_router_node`, and now launchable with `enable_security:=true`) in WSL against a real QGroundControl instance and a PX4 SITL or real vehicle — everything to this point has been verified via unit tests, byte-for-byte pymavlink comparison, and real-socket simulation (plus, now, a live pymavlink-decoded UDP demo and a real 3-node router topology test), but never against the actual external systems it's meant to interoperate with. This is also the first opportunity to confirm `enable_security:=true` actually launches cleanly once SAS/mavlink-bridge are colcon-built and installed (validated so far only up to the point where `ros2 launch` tries to resolve the uninstalled packages).
+2. Phase 3: QGC Custom Plugin (separate session, C++/Qt/QML).
 
 ---
 
 ## Known Limitations
 
 1. **Mission Signer:** private key stored unencrypted on disk (file-permission-restricted only).
-2. **DDS-Security enforcement not wired into the mavlink-bridge launch file:** the keystore has correct, verified, least-privilege enclaves for all 7 mavlink-bridge nodes, but `launch_sas_qgc_integration.py` doesn't yet set `ROS_SECURITY_ENABLE`/`ROS_SECURITY_STRATEGY`/`ROS_SECURITY_KEYSTORE` the way `secure_launch.py` does — security is available but not yet turned on for that launch file.
-3. **QGC Plugin:** requires C++/Qt/QML, not attempted in any session so far.
-4. **No live validation yet:** all verification to date is unit/integration-level (pymavlink byte comparison, real sockets, real crypto) — not yet run against real QGroundControl, PX4, or hardware.
+2. **QGC Plugin:** requires C++/Qt/QML, not attempted in any session so far.
+3. **No live validation yet:** all verification to date is unit/integration-level (pymavlink byte comparison, real sockets, real crypto) — not yet run against real QGroundControl, PX4, or hardware. This includes `enable_security:=true` itself: confirmed via `ros2 launch --show-args` and a real (if incomplete, due to uninstalled packages) launch attempt that the env-var/conditional-logging wiring executes correctly, but never run through to nodes actually starting under DDS-Security enforcement.

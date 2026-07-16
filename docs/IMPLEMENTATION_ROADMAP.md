@@ -85,7 +85,7 @@ Built directly on the corrected `mavlink_v2.py`, following the Phase 0 pattern: 
 
 ### 2d. Launch File Update — ✅ DONE
 - **File:** `mavlink-bridge/launch_sas_qgc_integration.py` — all three new bridges added, plus `mavlink_router_node` (2e below).
-- DDS-Security enclaves for all 7 mavlink-bridge nodes are now generated and tailored (2f below); `launch_sas_qgc_integration.py` itself doesn't yet set the `ROS_SECURITY_*` env vars, so security is available but not yet enforced for this launch file — see 2f.
+- DDS-Security enclaves for all 7 mavlink-bridge nodes are now generated, tailored, and enforced via an opt-in `enable_security` arg on this launch file (2f, 2g below).
 
 ### 2e. MAVLink Router (inbound single-UDP-port limitation) — ✅ DONE
 - **File:** `mavlink-bridge/mavlink_router_node.py`
@@ -109,7 +109,12 @@ Built directly on the corrected `mavlink_v2.py`, following the Phase 0 pattern: 
   - `emergency_wipe_mavlink_bridge`: subscribe `emergency_wipe/status`; service client to `emergency_wipe/execute` (publish+subscribe `rq/.../executeRequest` and `rr/.../executeReply`, matching the existing `emergency_wipe_node` server-side enclave's exact pattern)
   - `mavlink_router_node`: nothing — it has zero ROS topics (pure UDP relay), so its grant is just the standard `ros_discovery_info` rule every enclave gets automatically
 - **Verified, not just generated:** all 7 certs verified to chain to `identity_ca.cert.pem` via `openssl verify`; all 7 `permissions.p7s` and `governance.p7s` verified as validly-signed CMS/S-MIME messages via `openssl cms -verify` against `permissions_ca.cert.pem` (these are MIME-wrapped, base64-encoded PKCS7 SignedData, not raw DER — `-inform DER` fails even on the pre-existing, known-good enclaves, which is what first made this look like a real problem before the format was correctly identified).
-- **Not yet done:** `launch_sas_qgc_integration.py` still doesn't set `ROS_SECURITY_*` env vars, so these enclaves aren't enforced for that launch file yet — see Known Limitations.
+- **Not yet done (at the time):** `launch_sas_qgc_integration.py` didn't yet set `ROS_SECURITY_*` env vars — resolved in 2g below.
+
+### 2g. Wire Security Into `launch_sas_qgc_integration.py` — ✅ DONE
+- **File:** `mavlink-bridge/launch_sas_qgc_integration.py`
+- **Added:** an opt-in `enable_security` launch arg (default `false`, so existing dev/test runs without a configured keystore/SROS2 aren't silently broken) and a `keystore_path` arg (default: `SAS/security/keystore` resolved as a sibling directory of `mavlink-bridge/`, overridable). When `enable_security:=true`, three `SetEnvironmentVariable` actions — `ROS_SECURITY_ENABLE=true`, `ROS_SECURITY_STRATEGY=Enforce`, `ROS_SECURITY_KEYSTORE=<keystore_path>` — apply to every node in the file (the 7 mavlink-bridge nodes plus the SAS-package `gps_spoof_detector_node`), each wrapped in `IfCondition(LaunchConfiguration('enable_security'))`, positioned before any `Node` action so the environment is set before any process spawns. Exactly the same three variables `SAS/launch/secure_launch.py` sets, so no new security model was introduced.
+- **Verified with the real `ros2 launch` tool (WSL):** `--show-args` shows both new arguments with correct defaults/descriptions; a real launch attempt with `enable_security:=true` prints a log line with the correctly-resolved keystore path and proceeds past all the new actions, failing only on `package 'SAS' not found` (expected — SAS/mavlink-bridge aren't colcon-installed packages in this bare ROS 2 install, the separate live-validation gap); the default (`enable_security:=false`) run prints no security-related log line at all, confirming the conditional actually gates the behavior rather than always firing.
 
 ---
 
@@ -157,10 +162,10 @@ Cross-checked and confirmed no topical redundancy between mavlink-bridge tests a
 - ✅ Phase 2: Fleet Manager, Collision, and Emergency Wipe bridges, built on the corrected `mavlink_v2.py` (OBSTACLE_DISTANCE/COMMAND_LONG/COMMAND_ACK added and pymavlink-verified)
 - ✅ Phase 2 follow-up: inbound single-UDP-port limitation resolved via `mavlink_router_node.py`, with no code changes to either existing inbound bridge
 - ✅ Phase 2 follow-up: DDS-Security enclaves generated and tailored to least-privilege for all 7 mavlink-bridge nodes, verified cryptographically
+- ✅ Phase 2 follow-up: security wired into `launch_sas_qgc_integration.py` via an opt-in `enable_security` arg, verified with the real `ros2 launch` tool
 
 ### Now / Next
-- Live ROS 2/WSL validation against real QGroundControl and PX4 — everything to date is unit/integration-tested but not run against the actual external systems
-- Merge `secure_launch.py`'s `ROS_SECURITY_*` env vars into `launch_sas_qgc_integration.py` so the now-tailored enclaves are actually enforced for the mavlink-bridge nodes, not just present in the keystore
+- Live ROS 2/WSL validation against real QGroundControl and PX4 — everything to date is unit/integration-tested but not run against the actual external systems, including `enable_security:=true` itself (verified only up to the point of `ros2 launch` resolving node packages, since SAS/mavlink-bridge aren't colcon-installed in this environment)
 
 ### Later
 - Phase 3: QGC Plugin (separate session, requires Qt/QML/C++)
@@ -219,7 +224,8 @@ mavlink-bridge/
 ### Before calling any of this "production-ready" (not yet done):
 - [ ] Full stack launched against real QGroundControl and PX4 (SITL or hardware) in a real ROS 2 environment
 - [x] DDS-Security enclaves generated and tailored to least-privilege for the 7 mavlink-bridge nodes
-- [ ] Security actually enforced for `launch_sas_qgc_integration.py` (enclaves exist and verify; the launch file doesn't yet set `ROS_SECURITY_*`)
+- [x] Security wired into `launch_sas_qgc_integration.py` (opt-in `enable_security` arg, verified with the real `ros2 launch` tool)
+- [ ] `enable_security:=true` actually run through to nodes starting under DDS-Security enforcement (verified so far only up to `ros2 launch` resolving node packages — blocked on SAS/mavlink-bridge not being colcon-installed in this environment, the same live-validation gap as everything else)
 
 ---
 

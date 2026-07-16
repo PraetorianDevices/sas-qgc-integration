@@ -30,6 +30,7 @@ IMPLEMENTATION_STATUS.md (this limitation is now resolved, not just documented).
 
 Usage:
   ros2 launch mavlink-bridge launch_sas_qgc_integration.py system_id:=1
+  ros2 launch mavlink-bridge launch_sas_qgc_integration.py enable_security:=true
 
 Parameters:
   system_id                   : MAVLink system ID (1-255, default 1)
@@ -38,10 +39,26 @@ Parameters:
   mission_control_listen_port : internal port mission_control_bridge binds, behind the router (default 14551)
   wipe_port                   : internal port emergency_wipe_bridge binds, behind the router (default 14556)
   router_downstream_port      : internal port mavlink_router_node itself binds to talk to both inbound bridges (default 14559)
+  enable_security              : set the ROS_SECURITY_* env vars (SROS2) for every node below, same three vars as
+                                  SAS/launch/secure_launch.py (default false -- opt-in, so existing runs without a
+                                  configured keystore/SROS2 install aren't silently broken)
+  keystore_path                : absolute path to the DDS-Security keystore (default: SAS/security/keystore,
+                                  resolved as a sibling of this repo's mavlink-bridge/ directory -- override if
+                                  your workspace layout differs)
 
   ⚠️ If you override mission_control_listen_port or wipe_port, you must also
   update mavlink_router_node's `downstream_targets` parameter below to match --
   it is not derived automatically from the other launch arguments.
+
+Security:
+  All 7 mavlink-bridge nodes below have enclaves in SAS/security/keystore
+  (generated + tailored to least-privilege; see IMPLEMENTATION_STATUS.md), so
+  `enable_security:=true` here launches every node in this file -- including
+  the SAS-package `gps_spoof_detector_node`, which already had its own
+  pre-existing enclave -- under ROS_SECURITY_ENABLE=true,
+  ROS_SECURITY_STRATEGY=Enforce, matching SAS/launch/secure_launch.py's own
+  env vars exactly. A node started this way with no matching enclave fails to
+  launch under Enforce; every node here has one.
 
 Expected Telemetry in QGC:
   - HEARTBEAT: Vehicle armed/disarmed status
@@ -52,10 +69,20 @@ Expected Telemetry in QGC:
   - STATUSTEXT: GPS spoofing alerts (WARNING/CRITICAL severity)
 """
 
+from pathlib import Path
+
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, LogInfo
+from launch.actions import DeclareLaunchArgument, LogInfo, SetEnvironmentVariable
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+
+# SAS/security/keystore, resolved as a sibling of this file's own package
+# directory (mavlink-bridge/) -- matches how SAS/launch/secure_launch.py
+# resolves its own keystore path relative to its own file location. Override
+# via the keystore_path launch argument if your workspace doesn't have SAS
+# and mavlink-bridge as sibling directories.
+_DEFAULT_KEYSTORE_PATH = str((Path(__file__).resolve().parent.parent / 'SAS' / 'security' / 'keystore'))
 
 
 def generate_launch_description():
@@ -103,6 +130,43 @@ def generate_launch_description():
         default_value='14559',
         description='Internal port mavlink_router_node itself binds to talk '
                     'to both inbound bridges'
+    )
+
+    enable_security_arg = DeclareLaunchArgument(
+        'enable_security',
+        default_value='false',
+        description='Set ROS_SECURITY_ENABLE/STRATEGY/KEYSTORE (SROS2) for '
+                    'every node in this file. Opt-in (default false) so '
+                    'existing runs without a configured keystore/SROS2 '
+                    'install are not silently broken.'
+    )
+
+    keystore_path_arg = DeclareLaunchArgument(
+        'keystore_path',
+        default_value=_DEFAULT_KEYSTORE_PATH,
+        description='Absolute path to the DDS-Security keystore (only used '
+                    'when enable_security:=true). Default resolves SAS/security/'
+                    'keystore as a sibling of this package.'
+    )
+
+    # SROS2 environment -- same three variables as SAS/launch/secure_launch.py,
+    # applied to the whole launch context (every node below) when enabled.
+    # Order matters: these must be declared/added to the LaunchDescription
+    # before the Node actions so the environment is set before any process
+    # spawns.
+    security_env_actions = [
+        SetEnvironmentVariable('ROS_SECURITY_ENABLE', 'true', condition=IfCondition(LaunchConfiguration('enable_security'))),
+        SetEnvironmentVariable('ROS_SECURITY_STRATEGY', 'Enforce', condition=IfCondition(LaunchConfiguration('enable_security'))),
+        SetEnvironmentVariable('ROS_SECURITY_KEYSTORE', LaunchConfiguration('keystore_path'), condition=IfCondition(LaunchConfiguration('enable_security'))),
+    ]
+
+    security_status_msg = LogInfo(
+        condition=IfCondition(LaunchConfiguration('enable_security')),
+        msg=[
+            'DDS-Security ENABLED for this launch: ROS_SECURITY_STRATEGY=Enforce, '
+            'ROS_SECURITY_KEYSTORE=', LaunchConfiguration('keystore_path'),
+            '. Any node below without a matching enclave will fail to start.',
+        ]
     )
 
     # ===== GPS Spoofing Detector Node =====
@@ -277,6 +341,10 @@ def generate_launch_description():
         mission_control_listen_port_arg,
         wipe_port_arg,
         router_downstream_port_arg,
+        enable_security_arg,
+        keystore_path_arg,
+        *security_env_actions,
+        security_status_msg,
         detector_started,
         gps_bridge_started,
         telemetry_started,
