@@ -47,7 +47,7 @@ def generate_launch_description():
 
     # GPS Spoofing Detector Node
     detector_node = Node(
-        package='SAS',
+        package='my_python_package',  # SAS's actual ROS 2 package name (see SAS/package.xml) -- 'SAS' is just the repo/directory name, not a registered package
         executable='gps_spoof_detector_node',
         namespace='/',
         parameters=[
