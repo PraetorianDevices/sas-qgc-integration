@@ -30,6 +30,22 @@ wrong total payload length). Its BATTERY_STATUS payload additionally had a
 bug where the real per-cell voltages argument was never used — a loop over
 `enumerate([0]*10)` meant every cell was always sent as 0V regardless of the
 vehicle's actual battery state.
+
+Found by building this bridge against the real px4_msgs package (not the
+hand-shaped test stubs) for the first time: `VehicleStatus.system_status`,
+`VehicleStatus.load`, `VehicleAttitude.rollspeed/pitchspeed/yawspeed`, and
+`BatteryStatus.energy_consumed_j` were never real px4_msgs fields at all --
+confirmed absent as far back as px4_msgs v1.14.0 (2023), not just a newer-
+version rename. The existing test suite's stubs supplied exactly the
+attributes this code expected, so it never caught that those attributes
+don't exist on the real messages -- this would have raised AttributeError
+on the very first VehicleAttitude/VehicleStatus callback against a real PX4
+instance. Angular rates actually come from a separate topic
+(VehicleAngularVelocity.xyz), and CPU load from a separate topic
+(Cpuload.load); MAVLink has no PX4 source for `system_status` (its 4-state
+DDS enum doesn't map onto MAV_STATE) or `energy_consumed` (PX4 doesn't track
+consumed energy in joules), so those two are simplified/marked unknown
+rather than invented.
 """
 
 import socket
@@ -45,9 +61,11 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPo
 from px4_msgs.msg import (
     VehicleLocalPosition,
     VehicleAttitude,
+    VehicleAngularVelocity,
     VehicleStatus,
     BatteryStatus,
     SensorGps,
+    Cpuload,
 )
 
 import mavlink_v2 as mav
@@ -131,9 +149,11 @@ class TelemetryMAVLinkBridge(Node):
         # Telemetry cache
         self._local_pos: Optional[VehicleLocalPosition] = None
         self._attitude: Optional[VehicleAttitude] = None
+        self._angular_velocity: Optional[VehicleAngularVelocity] = None
         self._vehicle_status: Optional[VehicleStatus] = None
         self._battery_status: Optional[BatteryStatus] = None
         self._sensor_gps: Optional[SensorGps] = None
+        self._cpuload: Optional[Cpuload] = None
 
         # Home position (for relative altitude)
         self._home_alt = 0.0
@@ -162,6 +182,13 @@ class TelemetryMAVLinkBridge(Node):
         )
 
         self.create_subscription(
+            VehicleAngularVelocity,
+            f'{self.topic_prefix}/fmu/out/vehicle_angular_velocity',
+            self._cb_angular_velocity,
+            qos
+        )
+
+        self.create_subscription(
             VehicleStatus,
             f'{self.topic_prefix}/fmu/out/vehicle_status',
             self._cb_vehicle_status,
@@ -179,6 +206,13 @@ class TelemetryMAVLinkBridge(Node):
             SensorGps,
             f'{self.topic_prefix}/fmu/out/sensor_gps',
             self._cb_sensor_gps,
+            qos
+        )
+
+        self.create_subscription(
+            Cpuload,
+            f'{self.topic_prefix}/fmu/out/cpuload',
+            self._cb_cpuload,
             qos
         )
 
@@ -202,6 +236,11 @@ class TelemetryMAVLinkBridge(Node):
         """Cache attitude."""
         self._attitude = msg
 
+    def _cb_angular_velocity(self, msg: VehicleAngularVelocity):
+        """Cache body-frame angular rates (roll/pitch/yaw speed) -- a
+        separate topic from VehicleAttitude, which carries orientation only."""
+        self._angular_velocity = msg
+
     def _cb_vehicle_status(self, msg: VehicleStatus):
         """Cache vehicle status."""
         self._vehicle_status = msg
@@ -214,6 +253,11 @@ class TelemetryMAVLinkBridge(Node):
         """Cache GPS data."""
         self._sensor_gps = msg
 
+    def _cb_cpuload(self, msg: Cpuload):
+        """Cache CPU load -- a separate topic from VehicleStatus, which has
+        no load field."""
+        self._cpuload = msg
+
     # ===== Publishers =====
 
     def _publish_heartbeat(self):
@@ -221,13 +265,10 @@ class TelemetryMAVLinkBridge(Node):
         if self._vehicle_status is None:
             return
 
-        # Determine system state
-        if self._vehicle_status.arming_state == 2:  # ARMED
-            mav_state = MAVState.ACTIVE
-        elif self._vehicle_status.system_status == 4:  # Ready
-            mav_state = MAVState.STANDBY
-        else:
-            mav_state = MAVState.STANDBY
+        # Determine system state. VehicleStatus has no `system_status` field
+        # (never did, at least as far back as px4_msgs v1.14.0) -- arming
+        # state is the only signal available here.
+        mav_state = MAVState.ACTIVE if self._vehicle_status.arming_state == 2 else MAVState.STANDBY
 
         payload = mav.build_heartbeat(
             type_=MAVType.QUADROTOR,
@@ -260,21 +301,31 @@ class TelemetryMAVLinkBridge(Node):
             )
             self._send_mavlink_frame(mav.MAVLINK_MSG_ID_GLOBAL_POSITION_INT, payload)
 
-        # Attitude
+        # Attitude. Angular rates are NOT fields on VehicleAttitude (that
+        # message carries orientation only) -- they come from the separate
+        # VehicleAngularVelocity topic, which may not have arrived yet even
+        # once attitude has, so default to 0.0 rather than blocking on it.
         roll, pitch, yaw = self._quaternion_to_euler(self._attitude.q)
+        if self._angular_velocity is not None:
+            rollspeed, pitchspeed, yawspeed = self._angular_velocity.xyz
+        else:
+            rollspeed = pitchspeed = yawspeed = 0.0
         payload = mav.build_attitude(
             time_boot_ms=self._time_boot_ms(),
             roll=roll,
             pitch=pitch,
             yaw=yaw,
-            rollspeed=self._attitude.rollspeed,
-            pitchspeed=self._attitude.pitchspeed,
-            yawspeed=self._attitude.yawspeed,
+            rollspeed=float(rollspeed),
+            pitchspeed=float(pitchspeed),
+            yawspeed=float(yawspeed),
         )
         self._send_mavlink_frame(mav.MAVLINK_MSG_ID_ATTITUDE, payload)
 
-        # System Status
+        # System Status. CPU load is NOT a VehicleStatus field -- it comes
+        # from the separate Cpuload topic; default to 0 if it hasn't arrived
+        # yet rather than blocking SYS_STATUS on a third, unrelated topic.
         if self._vehicle_status is not None:
+            load_fraction = self._cpuload.load if self._cpuload is not None else 0.0
             payload = mav.build_sys_status(
                 # All 32 bits reported present/enabled/healthy — the bridge has no
                 # per-sensor bit mapping, so this is a best-effort "all good" default
@@ -283,7 +334,7 @@ class TelemetryMAVLinkBridge(Node):
                 sensors_present=0xFFFFFFFF,
                 sensors_enabled=0xFFFFFFFF,
                 sensors_health=0xFFFFFFFF,
-                load=int(self._vehicle_status.load * 1000),
+                load=int(load_fraction * 1000),
                 voltage_battery=int(self._get_battery_voltage() * 1000),
                 current_battery=int(self._get_battery_current() * 100),
                 battery_remaining=int(self._get_battery_remaining()),
@@ -296,7 +347,10 @@ class TelemetryMAVLinkBridge(Node):
             )
             self._send_mavlink_frame(mav.MAVLINK_MSG_ID_SYS_STATUS, payload)
 
-        # Battery Status
+        # Battery Status. energy_consumed is NOT a BatteryStatus field --
+        # PX4 doesn't track joules consumed (only discharged_mah, already
+        # used above) -- so report it as unknown (-1), MAVLink's documented
+        # sentinel for this field, rather than inventing a value.
         if self._battery_status is not None:
             payload = mav.build_battery_status(
                 id_=0,
@@ -306,7 +360,7 @@ class TelemetryMAVLinkBridge(Node):
                 voltages=[int(v * 1000) for v in self._battery_status.voltage_cell_v[:10]],
                 current_battery=int(self._battery_status.current_a * 100),
                 current_consumed=int(self._battery_status.discharged_mah),
-                energy_consumed=int(self._battery_status.energy_consumed_j * 1000),
+                energy_consumed=-1,
                 battery_remaining=int(self._get_battery_remaining()),
                 time_remaining=0,
                 charge_state=0,

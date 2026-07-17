@@ -131,8 +131,9 @@ def _install_ros_stubs():
     sys.modules['std_srvs.srv'] = std_srvs_srv_mock
 
     px4_msgs_mock = types.ModuleType('px4_msgs.msg')
-    for name in ('VehicleLocalPosition', 'VehicleAttitude', 'VehicleStatus',
-                 'BatteryStatus', 'SensorGps', 'ObstacleDistance'):
+    for name in ('VehicleLocalPosition', 'VehicleAttitude', 'VehicleAngularVelocity',
+                 'VehicleStatus', 'BatteryStatus', 'SensorGps', 'ObstacleDistance',
+                 'Cpuload'):
         setattr(px4_msgs_mock, name, type(name, (), {}))
     sys.modules['px4_msgs'] = types.ModuleType('px4_msgs')
     sys.modules['px4_msgs.msg'] = px4_msgs_mock

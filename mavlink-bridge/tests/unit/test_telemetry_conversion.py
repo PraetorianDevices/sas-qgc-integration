@@ -49,9 +49,11 @@ def _make_bridge():
     bridge.get_logger = lambda: MagicMock()
     bridge._local_pos = None
     bridge._attitude = None
+    bridge._angular_velocity = None
     bridge._vehicle_status = None
     bridge._battery_status = None
     bridge._sensor_gps = None
+    bridge._cpuload = None
     return bridge
 
 
@@ -133,8 +135,7 @@ class TestHeartbeatReal:
     def test_armed_sets_base_mode_192(self):
         bridge = _make_bridge()
         sent = _capture_socket(bridge)
-        bridge._vehicle_status = types.SimpleNamespace(
-            arming_state=2, system_status=4, nav_state=4)
+        bridge._vehicle_status = types.SimpleNamespace(arming_state=2, nav_state=4)
 
         bridge._publish_heartbeat()
 
@@ -146,8 +147,7 @@ class TestHeartbeatReal:
     def test_disarmed_sets_base_mode_0(self):
         bridge = _make_bridge()
         sent = _capture_socket(bridge)
-        bridge._vehicle_status = types.SimpleNamespace(
-            arming_state=1, system_status=3, nav_state=0)
+        bridge._vehicle_status = types.SimpleNamespace(arming_state=1, nav_state=0)
 
         bridge._publish_heartbeat()
 
@@ -173,16 +173,15 @@ class TestPublishTelemetryReal:
         sent = _capture_socket(bridge)
         bridge._local_pos = types.SimpleNamespace(
             z=-50.0, z_valid=True, vx=2.5, vy=-1.0, vz=0.1, heading=1.57)
-        bridge._attitude = types.SimpleNamespace(
-            q=[0.966, 0.0, 0.0, 0.259], rollspeed=0.01, pitchspeed=0.02, yawspeed=0.03)
-        bridge._vehicle_status = types.SimpleNamespace(
-            arming_state=2, system_status=4, nav_state=4, load=0.35)
+        bridge._attitude = types.SimpleNamespace(q=[0.966, 0.0, 0.0, 0.259])
+        bridge._angular_velocity = types.SimpleNamespace(xyz=[0.01, 0.02, 0.03])
+        bridge._vehicle_status = types.SimpleNamespace(arming_state=2, nav_state=4)
         bridge._sensor_gps = types.SimpleNamespace(
             fix_type=3, lat=377_749_000, lon=-1_224_194_000, alt=100_500)
         bridge._battery_status = types.SimpleNamespace(
             temperature=25, voltage_cell_v=[4.2, 4.19, 4.18, 4.17, 0, 0, 0, 0, 0, 0],
-            cell_count=4, current_a=12.5, discharged_mah=850,
-            energy_consumed_j=45_000.0, remaining=0.72)
+            cell_count=4, current_a=12.5, discharged_mah=850, remaining=0.72)
+        bridge._cpuload = types.SimpleNamespace(load=0.35)
         return bridge, sent
 
     def test_all_frames_pass_crc_validation(self, bridge_with_telemetry):
@@ -250,9 +249,59 @@ class TestPublishTelemetryReal:
     def test_no_local_position_sends_nothing(self):
         bridge = _make_bridge()
         sent = _capture_socket(bridge)
-        bridge._attitude = types.SimpleNamespace(q=[1, 0, 0, 0], rollspeed=0, pitchspeed=0, yawspeed=0)
+        bridge._attitude = types.SimpleNamespace(q=[1, 0, 0, 0])
         bridge._publish_telemetry()  # _local_pos is still None
         assert sent == []
+
+    def test_attitude_rates_come_from_angular_velocity_topic(self, bridge_with_telemetry):
+        """Regression test: rollspeed/pitchspeed/yawspeed are not fields on
+        VehicleAttitude at all (confirmed absent from real px4_msgs, not
+        just renamed) -- they come from the separate VehicleAngularVelocity
+        topic's `xyz` field."""
+        bridge, sent = bridge_with_telemetry
+        bridge._publish_telemetry()
+        parsed = _parsed(sent, mav.MAVLINK_MSG_ID_ATTITUDE)
+        _, roll, pitch, yaw, rollspeed, pitchspeed, yawspeed = struct.unpack(
+            '<Iffffff', parsed.payload.ljust(28, b'\x00')[:28])
+        assert rollspeed == pytest.approx(0.01, abs=1e-6)
+        assert pitchspeed == pytest.approx(0.02, abs=1e-6)
+        assert yawspeed == pytest.approx(0.03, abs=1e-6)
+
+    def test_no_angular_velocity_yet_defaults_rates_to_zero(self, bridge_with_telemetry):
+        """Angular velocity is a separate topic from attitude and may not
+        have arrived yet even once attitude has -- must not block or crash
+        ATTITUDE publishing, just report 0.0 rates."""
+        bridge, sent = bridge_with_telemetry
+        bridge._angular_velocity = None
+        bridge._publish_telemetry()  # must not raise
+        parsed = _parsed(sent, mav.MAVLINK_MSG_ID_ATTITUDE)
+        assert parsed is not None and parsed.valid
+        _, _, _, _, rollspeed, pitchspeed, yawspeed = struct.unpack(
+            '<Iffffff', parsed.payload.ljust(28, b'\x00')[:28])
+        assert (rollspeed, pitchspeed, yawspeed) == (0.0, 0.0, 0.0)
+
+    def test_no_cpuload_yet_defaults_sys_status_load_to_zero(self, bridge_with_telemetry):
+        """CPU load is not a VehicleStatus field -- it comes from the
+        separate Cpuload topic, which may not have arrived yet; must not
+        block or crash SYS_STATUS publishing."""
+        bridge, sent = bridge_with_telemetry
+        bridge._cpuload = None
+        bridge._publish_telemetry()  # must not raise
+        parsed = _parsed(sent, mav.MAVLINK_MSG_ID_SYS_STATUS)
+        _, _, _, load, *_ = struct.unpack(
+            '<IIIHHhHHHHHHb', parsed.payload.ljust(31, b'\x00')[:31])
+        assert load == 0
+
+    def test_battery_status_energy_consumed_reported_unknown(self, bridge_with_telemetry):
+        """Regression test: energy_consumed_j is not a BatteryStatus field
+        (PX4 doesn't track joules consumed) -- must report MAVLink's
+        documented "unknown" sentinel (-1), not a fabricated value."""
+        bridge, sent = bridge_with_telemetry
+        bridge._publish_telemetry()
+        parsed = _parsed(sent, mav.MAVLINK_MSG_ID_BATTERY_STATUS)
+        current_consumed, energy_consumed, *_ = struct.unpack(
+            '<iih10HhBBBb', parsed.payload.ljust(36, b'\x00')[:36])
+        assert energy_consumed == -1
 
     def test_time_boot_ms_does_not_overflow_uint32(self, bridge_with_telemetry):
         """Regression test: time_boot_ms=int(time.time()*1000) overflows
