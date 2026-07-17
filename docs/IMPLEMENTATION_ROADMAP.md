@@ -11,6 +11,7 @@ Full implementation of `SAS_QGC_Integration_Plan.md`, excluding `gesture_bridge_
 3. **Phase 2 (✅ Complete):** Remaining ROS 2 Bridges (Fleet Manager, Collision, Emergency Wipe)
 4. **Phase 3 (Not started):** QGC Custom Plugin
 5. **Phase 4 (✅ Complete for Phases 0/1/1.5/2):** Comprehensive Testing
+6. **Phase 5 (In progress — build/import verified, nothing launched yet):** Live ROS 2 Build & Validation
 
 ---
 
@@ -146,11 +147,43 @@ Built directly on the corrected `mavlink_v2.py`, following the Phase 0 pattern: 
 | Emergency Wipe Bridge | 14 unit + 4 integration | ✅ Yes (real bound socket + real receiver thread) | ✅ Done (Phase 2) |
 | MAVLink Router | 12 unit + 9 integration (incl. real 3-node topology) | ✅ Yes (real router, real bridges, real sockets) | ✅ Done (Phase 2) |
 
-**Totals:** mavlink-bridge suite 197/197 passing (zero exclusions); SAS unit suite 1215/1215 passing (3 pre-existing skips).
+**Totals:** mavlink-bridge suite 201/201 passing (zero exclusions); SAS unit suite 1215/1215 passing (3 pre-existing skips).
 
 ### Test Verification vs SAS Repo
 
 Cross-checked and confirmed no topical redundancy between mavlink-bridge tests and SAS's own test suite (SAS tests executor/node *logic*; bridge tests target MAVLink *translation* — different layers). This finding from the original roadmap still holds. The larger, previously-unstated problem was never redundancy — it was that most bridge tests didn't test anything real at all, regardless of redundancy.
+
+---
+
+## Phase 5: Live ROS 2 Build & Validation — IN PROGRESS
+
+The first real ROS 2 environment used in this whole project (WSL Ubuntu 24.04, ROS 2 Jazzy, `colcon`) — as opposed to the stubbed `rclpy`/`px4_msgs` every unit/integration test uses — surfaced real bugs that stubs cannot catch, since a stub supplies exactly the attributes the code expects rather than modeling what real tooling and real message schemas actually contain.
+
+### Environment discovered already partially set up (not created this session)
+- `~/PX4-Autopilot` already cloned, PX4 SITL already built (`build/px4_sitl_default/bin/px4`, valid ELF binary, built 2026-06-28).
+- A colcon workspace at `~/ros2_ws` already had `my_python_package` (SAS) built (from 2026-04-02).
+- Gazebo Harmonic already installed (`gz-sim8-cli` etc.).
+- QGroundControl confirmed installed as a native Windows application (`C:\Program Files\QGroundControl\bin\QGroundControl.exe`).
+- None of the above was rebuilt or altered beyond adding `mavlink-bridge` and `px4_msgs` to the same workspace; nothing has been launched.
+
+### Packaging bugs found and fixed getting `colcon build` to succeed
+None of these were caught by 201 passing unit/integration tests, since none of them exercise packaging or `ros2 launch`/`ros2 run` resolution — a genuinely different failure surface than anything covered so far.
+
+1. **`package='SAS'`** in `launch_sas_qgc_integration.py`, `launch_gps_spoof_qgc.py`, and `tests/integration/launch_full_integration.py` — the real registered package name is `my_python_package` (per `SAS/package.xml`/`setup.py`); `SAS` is only the repo directory name. Fixed to `package='my_python_package'` in all three.
+2. **`mavlink-bridge/package.xml` missing `<export><build_type>ament_python</build_type></export>`** — colcon couldn't tell it was a Python package and tried to configure it as CMake. Added the export block (matching `SAS/package.xml`) and `<depend>std_srvs</depend>` (used by `emergency_wipe_mavlink_bridge.py`, previously undeclared).
+3. **`mavlink-bridge/setup.py` missing the standard `data_files` block** (ament_index resource_index registration + launch file installation) — without it, neither `ros2 pkg list` nor `ros2 launch mavlink-bridge <file>.py` could find the package post-install. Added the block plus a `resource/mavlink-bridge` marker file; the two top-level launch files are installed by name into `share/mavlink-bridge/launch/` without moving them in the source tree (avoids touching the many existing doc references to their current paths).
+4. **`mavlink-bridge` missing `setup.cfg`** — without the `[develop]`/`[install]` `script_dir`/`install_scripts` override (present in `SAS/setup.cfg`), setuptools installed all 8 console_scripts into a generic `bin/` instead of ROS 2's expected `lib/mavlink-bridge/`, so `ros2 run`/`ros2 pkg executables mavlink-bridge` found zero executables despite a "successful" build. Added `setup.cfg` matching `SAS`'s convention.
+
+**Result:** `colcon build --symlink-install --packages-select my_python_package mavlink-bridge` succeeds cleanly; `ros2 pkg executables mavlink-bridge` lists all 8 executables; `ros2 launch mavlink-bridge launch_sas_qgc_integration.py --show-args` resolves the launch file by package name for the first time in this project.
+
+### `px4_msgs` built from source — revealed real field-mismatch bugs
+`px4_msgs` was entirely missing from the environment (needed at runtime by `telemetry_mavlink_bridge.py`, `collision_mavlink_bridge.py`, several SAS nodes). Cloned (`PX4/px4_msgs`, main branch, v1.17.0) and built via colcon. Importing the real messages for the first time (rather than test stubs) surfaced genuine bugs in `telemetry_mavlink_bridge.py` — see Phase 0/1's bug list update below, since this is a code-correctness finding, not a packaging one:
+
+- `VehicleStatus.system_status`, `VehicleStatus.load`, `VehicleAttitude.rollspeed`/`pitchspeed`/`yawspeed`, and `BatteryStatus.energy_consumed_j` are not real px4_msgs fields — confirmed absent as far back as v1.14.0 (2023), not a version-specific rename. Would have raised `AttributeError` on the very first real `VehicleAttitude`/`VehicleStatus` callback, at any point in this bridge's history. **Fixed**: angular rates now sourced from a new `VehicleAngularVelocity` subscription (`xyz`), CPU load from a new `Cpuload` subscription (`load`), heartbeat state simplified to arming-state-only, `energy_consumed` reported as MAVLink's documented unknown sentinel (`-1`). 4 new regression tests (`test_telemetry_conversion.py`: 18 → 22).
+- Checked SAS's own px4_msgs usage for the same class of bug (`grep` for the four confirmed-bad field names across `SAS/my_python_package`) — no other occurrences found.
+
+### Not yet done
+Nothing has been launched — no node started, no PX4 SITL run, no QGroundControl opened, no `ros2 launch` beyond `--show-args`. That's the next step.
 
 ---
 
@@ -163,9 +196,10 @@ Cross-checked and confirmed no topical redundancy between mavlink-bridge tests a
 - ✅ Phase 2 follow-up: inbound single-UDP-port limitation resolved via `mavlink_router_node.py`, with no code changes to either existing inbound bridge
 - ✅ Phase 2 follow-up: DDS-Security enclaves generated and tailored to least-privilege for all 7 mavlink-bridge nodes, verified cryptographically
 - ✅ Phase 2 follow-up: security wired into `launch_sas_qgc_integration.py` via an opt-in `enable_security` arg, verified with the real `ros2 launch` tool
+- ✅ Phase 5 (in progress): both packages now `colcon build` cleanly in a real ROS 2 workspace; 4 real packaging bugs found and fixed; `px4_msgs` built from source, revealing (and fixing) real field-mismatch bugs in `telemetry_mavlink_bridge.py` that no stub-based test could have caught
 
 ### Now / Next
-- Live ROS 2/WSL validation against real QGroundControl and PX4 — everything to date is unit/integration-tested but not run against the actual external systems, including `enable_security:=true` itself (verified only up to the point of `ros2 launch` resolving node packages, since SAS/mavlink-bridge aren't colcon-installed in this environment)
+- **Actually launch the stack.** PX4 SITL is already built, QGroundControl is already installed, both ROS 2 packages now colcon-build cleanly — the next step is a real `ros2 launch mavlink-bridge launch_sas_qgc_integration.py` run, the first genuine end-to-end execution this project has had. This is also the first chance to confirm `enable_security:=true` actually starts nodes under DDS-Security enforcement, not just sets env vars correctly.
 
 ### Later
 - Phase 3: QGC Plugin (separate session, requires Qt/QML/C++)
@@ -185,7 +219,7 @@ mavlink-bridge/
 ├── collision_mavlink_bridge.py         ✅ Phase 2: ObstacleDistance → OBSTACLE_DISTANCE
 ├── emergency_wipe_mavlink_bridge.py    ✅ Phase 2: COMMAND_LONG → wipe service (two-factor gated)
 ├── mavlink_router_node.py              ✅ Phase 2: fans QGC's one link to both inbound bridges
-└── tests/                              ✅ 197 tests, all import real modules
+└── tests/                              ✅ 201 tests, all import real modules
 
 SAS/
 ├── security/mission_signer.py          ✅ correct
@@ -225,7 +259,10 @@ mavlink-bridge/
 - [ ] Full stack launched against real QGroundControl and PX4 (SITL or hardware) in a real ROS 2 environment
 - [x] DDS-Security enclaves generated and tailored to least-privilege for the 7 mavlink-bridge nodes
 - [x] Security wired into `launch_sas_qgc_integration.py` (opt-in `enable_security` arg, verified with the real `ros2 launch` tool)
-- [ ] `enable_security:=true` actually run through to nodes starting under DDS-Security enforcement (verified so far only up to `ros2 launch` resolving node packages — blocked on SAS/mavlink-bridge not being colcon-installed in this environment, the same live-validation gap as everything else)
+- [x] Both packages (`my_python_package`, `mavlink-bridge`) colcon-build cleanly in a real ROS 2 workspace, with all executables/launch files discoverable by package name (Phase 5)
+- [x] `px4_msgs` built from source and importable by the bridges that need it at runtime
+- [ ] `enable_security:=true` actually run through to nodes starting under DDS-Security enforcement (verified so far only that the env vars/log message are correct — the packages weren't installed yet when that was checked; worth re-verifying now that they are)
+- [ ] Nodes actually launched and run against PX4 SITL / QGroundControl (both already built/installed in this environment, per Phase 5, but never started)
 
 ---
 
