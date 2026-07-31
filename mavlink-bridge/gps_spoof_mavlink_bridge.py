@@ -29,7 +29,6 @@ from enum import IntEnum
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from std_msgs.msg import String
 
 import mavlink_v2 as mav
@@ -107,20 +106,20 @@ class GPSSpoofMAVLinkBridge(Node):
         # Sequence counter for MAVLink packets
         self._sequence = 0
 
-        # QoS profile matching PX4's DDS bridge
-        qos = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1
-        )
-
-        # Subscribe to GPS spoofing alerts
+        # Subscribe to GPS spoofing alerts. gps_spoof_detector_node publishes
+        # /gps_spoof_alert with plain default QoS (RELIABLE, VOLATILE, depth
+        # 10) -- a TRANSIENT_LOCAL subscriber would never match a VOLATILE
+        # publisher under real DDS (durability is not negotiable), so this
+        # must use plain depth-10 default QoS to match, same fix already
+        # applied to mission_control_bridge's mission_executor/status
+        # subscription. The previous TRANSIENT_LOCAL/BEST_EFFORT profile here
+        # was copy-pasted from a PX4-topic QoS profile and never actually
+        # matched anything this file subscribes to.
         self.create_subscription(
             String,
             '/gps_spoof_alert',
             self._cb_gps_spoof_alert,
-            qos
+            10
         )
 
         self.get_logger().info('GPS Spoof MAVLink Bridge started')
