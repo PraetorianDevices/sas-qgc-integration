@@ -17,6 +17,7 @@ setup(
         'collision_mavlink_bridge',
         'emergency_wipe_mavlink_bridge',
         'mavlink_router_node',
+        'test_gps_spoof_alert_generator',
     ],
     # Without this block, colcon installs the package with no ament_index
     # resource_index marker and no launch files copied to share/ -- `ros2
