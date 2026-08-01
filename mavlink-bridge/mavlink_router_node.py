@@ -64,12 +64,14 @@ class MAVLinkRouterNode(Node):
         super().__init__('mavlink_router_node')
 
         self.declare_parameter('mavlink_host', 'localhost')
+        self.declare_parameter('mavlink_bind_host', '0.0.0.0')
         self.declare_parameter('mavlink_port', 14550)
         self.declare_parameter('downstream_bind_host', 'localhost')
         self.declare_parameter('downstream_bind_port', 14559)
         self.declare_parameter('downstream_targets', ['localhost:14551', 'localhost:14556'])
 
         mavlink_host = self.get_parameter('mavlink_host').value
+        mavlink_bind_host = self.get_parameter('mavlink_bind_host').value
         mavlink_port = self.get_parameter('mavlink_port').value
         downstream_bind_host = self.get_parameter('downstream_bind_host').value
         downstream_bind_port = self.get_parameter('downstream_bind_port').value
@@ -80,18 +82,24 @@ class MAVLinkRouterNode(Node):
             self.get_logger().warn('No valid downstream_targets configured; router will forward nowhere')
 
         self.get_logger().info(
-            f'MAVLink Router initialized: external={mavlink_host}:{mavlink_port}, '
+            f'MAVLink Router initialized: external bind={mavlink_bind_host}:{mavlink_port} '
+            f'(QGC target={mavlink_host}:{mavlink_port}), '
             f'downstream_bind={downstream_bind_host}:{downstream_bind_port}, '
             f'targets={self._downstream_targets}'
         )
 
         # External (QGC-facing) socket: bound once, used for both receiving
-        # from QGC and relaying replies back to it.
+        # from QGC and relaying replies back to it. Bound to mavlink_bind_host
+        # (default 0.0.0.0), NOT mavlink_host -- the two are different
+        # addresses whenever QGC runs on a different host/network namespace
+        # than this node (e.g. QGC on native Windows, this node inside WSL2
+        # NAT: mavlink_host is the Windows-side gateway IP outbound bridges
+        # send to, which is never a locally-assignable bind address here).
         self._external_socket: Optional[socket.socket] = None
         try:
             self._external_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self._external_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self._external_socket.bind((mavlink_host, mavlink_port))
+            self._external_socket.bind((mavlink_bind_host, mavlink_port))
             self._external_socket.settimeout(0.5)
         except OSError as e:
             self.get_logger().error(f'Failed to bind external UDP socket: {e}')

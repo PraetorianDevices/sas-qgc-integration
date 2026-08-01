@@ -68,6 +68,7 @@ class EmergencyWipeMAVLinkBridge(Node):
         self.declare_parameter('system_id', 1)
         self.declare_parameter('component_id', 1)
         self.declare_parameter('mavlink_host', 'localhost')
+        self.declare_parameter('mavlink_bind_host', '0.0.0.0')
         self.declare_parameter('mavlink_port', 14550)
         self.declare_parameter('drone_id', '')
         self.declare_parameter('wipe_command_id', MAV_CMD_USER_1)
@@ -76,6 +77,7 @@ class EmergencyWipeMAVLinkBridge(Node):
         self.system_id = self.get_parameter('system_id').value
         self.component_id = self.get_parameter('component_id').value
         mavlink_host = self.get_parameter('mavlink_host').value
+        mavlink_bind_host = self.get_parameter('mavlink_bind_host').value
         mavlink_port = self.get_parameter('mavlink_port').value
         self.drone_id = self.get_parameter('drone_id').value
         self.topic_prefix = f'/{self.drone_id}' if self.drone_id else ''
@@ -85,19 +87,24 @@ class EmergencyWipeMAVLinkBridge(Node):
         self.get_logger().info(
             f'Emergency Wipe MAVLink Bridge initialized: '
             f'system_id={self.system_id}, component_id={self.component_id}, '
-            f'listen={mavlink_host}:{mavlink_port}, '
+            f'listen={mavlink_bind_host}:{mavlink_port} (QGC target={mavlink_host}:{mavlink_port}), '
             f'wipe_command_id={self.wipe_command_id}'
         )
 
-        # UDP socket (inbound from QGC)
+        # UDP socket (inbound from QGC). Bound to mavlink_bind_host (default
+        # 0.0.0.0), NOT mavlink_host -- the two differ whenever QGC runs on a
+        # different host/network namespace than this node (e.g. QGC on native
+        # Windows, this node inside WSL2 NAT), where mavlink_host is the
+        # Windows-side address outbound bridges send to and is never a
+        # locally-assignable bind address here.
         self._socket: Optional[socket.socket] = None
         self._sequence = 0
         try:
             self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self._socket.bind((mavlink_host, mavlink_port))
+            self._socket.bind((mavlink_bind_host, mavlink_port))
             self._socket.settimeout(0.5)
-            self.get_logger().info(f'Listening for MAVLink commands on {mavlink_host}:{mavlink_port}')
+            self.get_logger().info(f'Listening for MAVLink commands on {mavlink_bind_host}:{mavlink_port}')
         except OSError as e:
             self.get_logger().error(f'Failed to bind UDP socket: {e}')
             self._socket = None

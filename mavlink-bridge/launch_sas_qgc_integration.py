@@ -36,6 +36,12 @@ Parameters:
   system_id                   : MAVLink system ID (1-255, default 1)
   drone_id                    : ROS 2 namespace for multi-drone (default empty for single drone)
   mavlink_port                : the single external UDP port QGC's comm link targets (default 14550) -- only mavlink_router_node binds this
+  mavlink_host                : destination host outbound bridges send to / where QGC is reachable (default localhost).
+                                  Set to the other host's address (e.g. a WSL2 default-gateway IP) when QGC runs in a
+                                  different network namespace than this launch -- see mavlink_bind_host below.
+  mavlink_bind_host           : local address mavlink_router_node/mission_control_bridge/emergency_wipe_bridge bind
+                                  their inbound sockets to (default 0.0.0.0). Deliberately separate from mavlink_host
+                                  for the WSL2-NAT case above, where mavlink_host is never a locally-assignable address.
   mission_control_listen_port : internal port mission_control_bridge binds, behind the router (default 14551)
   wipe_port                   : internal port emergency_wipe_bridge binds, behind the router (default 14556)
   router_downstream_port      : internal port mavlink_router_node itself binds to talk to both inbound bridges (default 14559)
@@ -110,7 +116,29 @@ def generate_launch_description():
     mavlink_host_arg = DeclareLaunchArgument(
         'mavlink_host',
         default_value='localhost',
-        description='Host for QGC connection'
+        description='Destination host outbound bridges send to, and the '
+                    'address QGC is reachable at. On a single machine this '
+                    'is the same address the inbound bridges bind to, but '
+                    'when QGC runs in a different network namespace than '
+                    'this launch (e.g. QGC on native Windows, ROS 2 in WSL2 '
+                    'NAT) this must be set to that other host\'s address '
+                    '(e.g. the WSL2 default-gateway IP) -- see mavlink_bind_host '
+                    'for the separate inbound bind address in that case.'
+    )
+
+    mavlink_bind_host_arg = DeclareLaunchArgument(
+        'mavlink_bind_host',
+        default_value='0.0.0.0',
+        description='Local address mavlink_router_node, mission_control_bridge, '
+                    'and emergency_wipe_bridge bind their inbound-listening '
+                    'sockets to. Deliberately separate from mavlink_host: '
+                    'under WSL2 NAT (QGC on Windows, this launch inside WSL2), '
+                    'mavlink_host is the Windows-side address outbound bridges '
+                    'send to, which is never a locally-assignable bind address '
+                    'inside the WSL2 VM. Default 0.0.0.0 (all local interfaces) '
+                    'works in every topology (native, WSL2 NAT, WSL2 mirrored, '
+                    'Docker); only override if you need to restrict which '
+                    'interface these sockets listen on.'
     )
 
     mission_control_listen_port_arg = DeclareLaunchArgument(
@@ -222,6 +250,7 @@ def generate_launch_description():
             {'component_id': 1},  # MAV_COMP_ID_AUTOPILOT
             {'drone_id': LaunchConfiguration('drone_id')},
             {'mavlink_host': LaunchConfiguration('mavlink_host')},
+            {'mavlink_bind_host': LaunchConfiguration('mavlink_bind_host')},
             {'mavlink_port': LaunchConfiguration('mission_control_listen_port')},
         ],
         output='screen'
@@ -268,6 +297,7 @@ def generate_launch_description():
             {'component_id': 1},  # MAV_COMP_ID_AUTOPILOT
             {'drone_id': LaunchConfiguration('drone_id')},
             {'mavlink_host': LaunchConfiguration('mavlink_host')},
+            {'mavlink_bind_host': LaunchConfiguration('mavlink_bind_host')},
             {'mavlink_port': LaunchConfiguration('wipe_port')},
         ],
         output='screen'
@@ -289,6 +319,7 @@ def generate_launch_description():
         namespace='/',
         parameters=[
             {'mavlink_host': LaunchConfiguration('mavlink_host')},
+            {'mavlink_bind_host': LaunchConfiguration('mavlink_bind_host')},
             {'mavlink_port': LaunchConfiguration('mavlink_port')},
             {'downstream_bind_host': 'localhost'},
             {'downstream_bind_port': LaunchConfiguration('router_downstream_port')},
@@ -338,6 +369,7 @@ def generate_launch_description():
         drone_id_arg,
         mavlink_port_arg,
         mavlink_host_arg,
+        mavlink_bind_host_arg,
         mission_control_listen_port_arg,
         wipe_port_arg,
         router_downstream_port_arg,
