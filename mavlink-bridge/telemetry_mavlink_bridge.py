@@ -169,7 +169,7 @@ class TelemetryMAVLinkBridge(Node):
         # Subscribe to telemetry topics
         self.create_subscription(
             VehicleLocalPosition,
-            f'{self.topic_prefix}/fmu/out/vehicle_local_position',
+            f'{self.topic_prefix}/fmu/out/vehicle_local_position_v1',
             self._cb_local_position,
             qos
         )
@@ -190,14 +190,14 @@ class TelemetryMAVLinkBridge(Node):
 
         self.create_subscription(
             VehicleStatus,
-            f'{self.topic_prefix}/fmu/out/vehicle_status',
+            f'{self.topic_prefix}/fmu/out/vehicle_status_v2',
             self._cb_vehicle_status,
             qos
         )
 
         self.create_subscription(
             BatteryStatus,
-            f'{self.topic_prefix}/fmu/out/battery_status',
+            f'{self.topic_prefix}/fmu/out/battery_status_v1',
             self._cb_battery_status,
             qos
         )
