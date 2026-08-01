@@ -179,7 +179,12 @@ class TestPublishTelemetryReal:
         bridge._sensor_gps = types.SimpleNamespace(
             fix_type=3, lat=377_749_000, lon=-1_224_194_000, alt=100_500)
         bridge._battery_status = types.SimpleNamespace(
-            temperature=25, voltage_cell_v=[4.2, 4.19, 4.18, 4.17, 0, 0, 0, 0, 0, 0],
+            # temperature is a float32 in real px4_msgs (degC) -- deliberately
+            # not a whole number here so a missing int() cast at the call site
+            # (struct.pack's integer format codes reject float arguments
+            # outright, even whole-valued ones) gets caught by this fixture
+            # instead of silently passing with an int-literal stand-in.
+            temperature=25.3, voltage_cell_v=[4.2, 4.19, 4.18, 4.17, 0, 0, 0, 0, 0, 0],
             cell_count=4, current_a=12.5, discharged_mah=850, remaining=0.72)
         bridge._cpuload = types.SimpleNamespace(load=0.35)
         return bridge, sent
@@ -211,6 +216,47 @@ class TestPublishTelemetryReal:
         assert present == 0xFFFFFFFF
         assert enabled == 0xFFFFFFFF
         assert health == 0xFFFFFFFF
+
+    def test_battery_status_temperature_converted_to_centidegrees_int16(
+            self, bridge_with_telemetry):
+        """Regression test: temperature was passed straight through as
+        PX4's float32 degC value with no int() cast or unit conversion,
+        raising struct.error (float rejected by an integer format code) the
+        first time this code path ever ran against real data -- previously
+        masked because battery_status was never actually received (wrong
+        DDS topic name) and the test fixture used an int literal that
+        happened to dodge the type check."""
+        bridge, sent = bridge_with_telemetry
+        bridge._publish_telemetry()
+        parsed = _parsed(sent, mav.MAVLINK_MSG_ID_BATTERY_STATUS)
+        _, _, temperature, *_ = struct.unpack(
+            '<iih10HhBBBb', parsed.payload.ljust(36, b'\x00')[:36])
+        assert temperature == 2530
+
+    def test_battery_status_nan_temperature_maps_to_unknown_sentinel(self):
+        """Regression test: PX4 SITL's simulated battery model leaves
+        temperature as NaN (PX4's convention for "unknown" on float fields)
+        rather than a real reading -- int(nan) raises ValueError, which
+        crashed this node the first time it ever ran against real SITL
+        data. MAVLink's documented sentinel for an unknown temperature is
+        INT16_MAX (32767); NaN must map to that instead of being converted
+        directly."""
+        bridge = _make_bridge()
+        sent = _capture_socket(bridge)
+        bridge._local_pos = types.SimpleNamespace(
+            z=-50.0, z_valid=True, vx=0.0, vy=0.0, vz=0.0, heading=0.0)
+        bridge._attitude = types.SimpleNamespace(q=[1.0, 0.0, 0.0, 0.0])
+        bridge._battery_status = types.SimpleNamespace(
+            temperature=float('nan'),
+            voltage_cell_v=[4.2, 4.19, 4.18, 4.17, 0, 0, 0, 0, 0, 0],
+            cell_count=4, current_a=12.5, discharged_mah=850, remaining=0.72)
+
+        bridge._publish_telemetry()
+
+        parsed = _parsed(sent, mav.MAVLINK_MSG_ID_BATTERY_STATUS)
+        _, _, temperature, *_ = struct.unpack(
+            '<iih10HhBBBb', parsed.payload.ljust(36, b'\x00')[:36])
+        assert temperature == 32767
 
     def test_battery_status_reports_real_cell_voltages_not_zero(self, bridge_with_telemetry):
         """Regression test for the bug where a loop over enumerate([0]*10)

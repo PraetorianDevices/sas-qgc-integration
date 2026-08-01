@@ -356,7 +356,19 @@ class TelemetryMAVLinkBridge(Node):
                 id_=0,
                 battery_function=0,  # MAV_BATTERY_FUNCTION_ALL
                 type_=2,  # MAV_BATTERY_TYPE_LIPO
-                temperature=self._battery_status.temperature,
+                # MAVLink's temperature field is centidegrees C (int16), with
+                # INT16_MAX documented as its "unknown" sentinel. PX4's
+                # BatteryStatus.temperature is a plain degC float, and SITL's
+                # simulated battery model leaves it as NaN (PX4's own
+                # "unknown" convention for float fields) rather than a real
+                # reading -- int(nan) raises ValueError, so that has to be
+                # mapped to MAVLink's sentinel instead of converted directly.
+                # Never exercised before the topic-name fix above, since
+                # battery_status was never actually received (dead code path).
+                temperature=(
+                    32767 if math.isnan(self._battery_status.temperature)
+                    else int(self._battery_status.temperature * 100)
+                ),
                 voltages=[int(v * 1000) for v in self._battery_status.voltage_cell_v[:10]],
                 current_battery=int(self._battery_status.current_a * 100),
                 current_consumed=int(self._battery_status.discharged_mah),
