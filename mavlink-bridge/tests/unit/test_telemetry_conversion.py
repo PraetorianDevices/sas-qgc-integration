@@ -52,7 +52,7 @@ def _make_bridge():
     bridge._angular_velocity = None
     bridge._vehicle_status = None
     bridge._battery_status = None
-    bridge._sensor_gps = None
+    bridge._global_pos = None
     bridge._cpuload = None
     return bridge
 
@@ -176,8 +176,8 @@ class TestPublishTelemetryReal:
         bridge._attitude = types.SimpleNamespace(q=[0.966, 0.0, 0.0, 0.259])
         bridge._angular_velocity = types.SimpleNamespace(xyz=[0.01, 0.02, 0.03])
         bridge._vehicle_status = types.SimpleNamespace(arming_state=2, nav_state=4)
-        bridge._sensor_gps = types.SimpleNamespace(
-            fix_type=3, lat=377_749_000, lon=-1_224_194_000, alt=100_500)
+        bridge._global_pos = types.SimpleNamespace(
+            lat_lon_valid=True, lat=37.7749, lon=-122.4194, alt=100.5)
         bridge._battery_status = types.SimpleNamespace(
             # temperature is a float32 in real px4_msgs (degC) -- deliberately
             # not a whole number here so a missing int() cast at the call site
@@ -288,7 +288,7 @@ class TestPublishTelemetryReal:
 
     def test_no_gps_fix_skips_global_position_int(self, bridge_with_telemetry):
         bridge, sent = bridge_with_telemetry
-        bridge._sensor_gps.fix_type = 0  # no fix
+        bridge._global_pos.lat_lon_valid = False  # no fix
         bridge._publish_telemetry()
         assert _parsed(sent, mav.MAVLINK_MSG_ID_GLOBAL_POSITION_INT) is None
 

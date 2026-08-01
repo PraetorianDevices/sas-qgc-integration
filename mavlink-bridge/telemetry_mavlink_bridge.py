@@ -64,7 +64,7 @@ from px4_msgs.msg import (
     VehicleAngularVelocity,
     VehicleStatus,
     BatteryStatus,
-    SensorGps,
+    VehicleGlobalPosition,
     Cpuload,
 )
 
@@ -152,7 +152,7 @@ class TelemetryMAVLinkBridge(Node):
         self._angular_velocity: Optional[VehicleAngularVelocity] = None
         self._vehicle_status: Optional[VehicleStatus] = None
         self._battery_status: Optional[BatteryStatus] = None
-        self._sensor_gps: Optional[SensorGps] = None
+        self._global_pos: Optional[VehicleGlobalPosition] = None
         self._cpuload: Optional[Cpuload] = None
 
         # Home position (for relative altitude)
@@ -203,9 +203,9 @@ class TelemetryMAVLinkBridge(Node):
         )
 
         self.create_subscription(
-            SensorGps,
-            f'{self.topic_prefix}/fmu/out/sensor_gps',
-            self._cb_sensor_gps,
+            VehicleGlobalPosition,
+            f'{self.topic_prefix}/fmu/out/vehicle_global_position',
+            self._cb_global_position,
             qos
         )
 
@@ -249,9 +249,9 @@ class TelemetryMAVLinkBridge(Node):
         """Cache battery status."""
         self._battery_status = msg
 
-    def _cb_sensor_gps(self, msg: SensorGps):
-        """Cache GPS data."""
-        self._sensor_gps = msg
+    def _cb_global_position(self, msg: VehicleGlobalPosition):
+        """Cache fused global position estimate."""
+        self._global_pos = msg
 
     def _cb_cpuload(self, msg: Cpuload):
         """Cache CPU load -- a separate topic from VehicleStatus, which has
@@ -286,13 +286,18 @@ class TelemetryMAVLinkBridge(Node):
         if self._local_pos is None or self._attitude is None:
             return
 
-        # Global Position
-        if self._sensor_gps is not None and self._sensor_gps.fix_type >= 3:
+        # Global Position. VehicleGlobalPosition (the fused EKF estimate) is
+        # used here rather than SensorGps (raw receiver data) because it's
+        # reliably exported by PX4's default DDS topic config -- SensorGps
+        # is not, in every environment checked so far. Its lat/lon are plain
+        # float64 degrees (not the 1e7-scaled int32 SensorGps/MAVLink use
+        # directly), so they need explicit scaling here.
+        if self._global_pos is not None and self._global_pos.lat_lon_valid:
             payload = mav.build_global_position_int(
                 time_boot_ms=self._time_boot_ms(),
-                lat=int(self._sensor_gps.lat),
-                lon=int(self._sensor_gps.lon),
-                alt=int(self._sensor_gps.alt * 1000),
+                lat=int(self._global_pos.lat * 1e7),
+                lon=int(self._global_pos.lon * 1e7),
+                alt=int(self._global_pos.alt * 1000),
                 relative_alt=int(-self._local_pos.z * 1000),
                 vx=int(self._local_pos.vx * 100),
                 vy=int(self._local_pos.vy * 100),
