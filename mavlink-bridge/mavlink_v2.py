@@ -211,6 +211,40 @@ def parse_frame(data: bytes) -> Optional[ParsedFrame]:
     )
 
 
+def parse_frames(data: bytes) -> list:
+    """Parse every well-formed MAVLink 2.0 frame packed into `data`, in order.
+
+    MAVLink is fundamentally a byte-stream protocol, not a one-message-per-
+    datagram one -- real senders (including QGC itself) routinely flush
+    several queued outgoing messages as a single UDP write, so more than one
+    frame can legitimately arrive in a single recvfrom() read. A caller that
+    only ever inspects the first frame in the buffer (as parse_frame() alone
+    does) silently discards every message packed after it -- this is exactly
+    what broke mission upload: QGC's MISSION_COUNT frequently arrives bundled
+    with its own outgoing HEARTBEAT ahead of it in the same datagram, so only
+    the (irrelevant) HEARTBEAT was ever seen and MISSION_COUNT was silently
+    dropped, with no error anywhere since parse_frame() has no way to report
+    "there was more data after the frame I found."
+
+    Stops at the first byte that isn't a valid frame start (STX) or a frame
+    that fails to parse -- our sources only ever emit back-to-back
+    well-formed frames, so this deliberately doesn't attempt stream resync
+    over genuinely malformed data.
+    """
+    frames = []
+    offset = 0
+    n = len(data)
+    while offset + HEADER_LEN + CRC_LEN <= n:
+        if data[offset] != MAVLINK_STX:
+            break
+        frame = parse_frame(data[offset:])
+        if frame is None:
+            break
+        frames.append(frame)
+        offset += HEADER_LEN + data[offset + 1] + CRC_LEN
+    return frames
+
+
 # ===== Payload builders (field order/width verified against pymavlink) =====
 
 def build_heartbeat(type_: int, autopilot: int, base_mode: int,

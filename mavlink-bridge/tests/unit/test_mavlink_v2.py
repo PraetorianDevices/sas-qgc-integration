@@ -200,6 +200,49 @@ class TestFrameHeaderStructure:
         assert parsed.valid is False
 
 
+class TestParseFrames:
+    """parse_frames() must find every message packed into one buffer, not
+    just the first -- regression coverage for the bug that silently broke
+    mission upload: QGC bundles its own outgoing HEARTBEAT ahead of
+    MISSION_COUNT in a single UDP write, and a receiver using parse_frame()
+    alone (which only ever looks at the first message) would process the
+    HEARTBEAT and silently discard the MISSION_COUNT with no error."""
+
+    def test_single_frame_buffer_returns_one_frame(self):
+        frame = mav.build_frame(mav.MAVLINK_MSG_ID_HEARTBEAT, 0,
+                                 mav.build_heartbeat(2, 4, 0, 0, 4), 1, 1)
+        frames = mav.parse_frames(frame)
+        assert len(frames) == 1
+        assert frames[0].msg_id == mav.MAVLINK_MSG_ID_HEARTBEAT
+        assert frames[0].valid
+
+    def test_two_bundled_frames_both_found_in_order(self):
+        heartbeat = mav.build_frame(mav.MAVLINK_MSG_ID_HEARTBEAT, 0,
+                                     mav.build_heartbeat(2, 4, 0, 0, 4), 255, 190)
+        count_payload = mav.build_mission_count(count=3, target_system=1,
+                                                 target_component=1)
+        mission_count = mav.build_frame(mav.MAVLINK_MSG_ID_MISSION_COUNT, 1,
+                                         count_payload, 255, 190)
+        bundled = heartbeat + mission_count
+
+        frames = mav.parse_frames(bundled)
+
+        assert len(frames) == 2
+        assert frames[0].msg_id == mav.MAVLINK_MSG_ID_HEARTBEAT
+        assert frames[1].msg_id == mav.MAVLINK_MSG_ID_MISSION_COUNT
+        assert frames[0].valid and frames[1].valid
+
+    def test_empty_buffer_returns_no_frames(self):
+        assert mav.parse_frames(b'') == []
+
+    def test_trailing_garbage_after_valid_frame_does_not_raise(self):
+        frame = mav.build_frame(mav.MAVLINK_MSG_ID_HEARTBEAT, 0,
+                                 mav.build_heartbeat(2, 4, 0, 0, 4), 1, 1)
+        frames = mav.parse_frames(frame + b'\x00\x01\x02')
+        assert len(frames) == 1
+        assert frames[0].msg_id == mav.MAVLINK_MSG_ID_HEARTBEAT
+
+
 class TestMissionItemIntRoundtrip:
     """build -> parse roundtrip for the mission item payload, since this is
     the message type that carries actual waypoint data."""

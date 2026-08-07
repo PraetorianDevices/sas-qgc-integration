@@ -202,11 +202,21 @@ class MissionControlBridge(Node):
                 self.get_logger().warn(f'Error in receiver loop: {e}')
 
     def _handle_mavlink_message(self, data: bytes, addr=None):
-        """Process incoming MAVLink message."""
-        parsed = mav.parse_frame(data)
-        if parsed is None or not parsed.valid:
-            return
+        """Process every MAVLink message packed into one incoming datagram.
 
+        QGC frequently bundles several outgoing messages (e.g. its own
+        HEARTBEAT ahead of a MISSION_COUNT) into a single UDP write -- using
+        parse_frame() alone here would silently process only the first one
+        and drop the rest with no error, which is exactly what broke mission
+        upload before this fix. See parse_frames()'s docstring for the full
+        explanation.
+        """
+        for parsed in mav.parse_frames(data):
+            if parsed.valid:
+                self._handle_one_message(parsed, addr)
+
+    def _handle_one_message(self, parsed, addr=None):
+        """Process a single already-parsed MAVLink message."""
         self._gcs_system_id = parsed.system_id
         self._gcs_component_id = parsed.component_id
         if addr is not None:

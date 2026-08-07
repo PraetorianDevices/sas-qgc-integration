@@ -146,10 +146,23 @@ class EmergencyWipeMAVLinkBridge(Node):
                 self.get_logger().warn(f'Error in receiver loop: {e}')
 
     def _handle_mavlink_message(self, data: bytes, addr=None):
-        """Process one inbound frame; act only on our configured command id."""
-        parsed = mav.parse_frame(data)
-        if parsed is None or not parsed.valid:
-            return
+        """Process every MAVLink message packed into one incoming datagram.
+
+        QGC frequently bundles several outgoing messages (e.g. its own
+        HEARTBEAT) into a single UDP write -- using parse_frame() alone here
+        would silently process only the first one and drop the rest with no
+        error. See mavlink_v2.parse_frames()'s docstring for the full
+        explanation (same bug, found and fixed for mission_control_bridge
+        first, since a real COMMAND_LONG arriving bundled behind an
+        unrelated leading message would otherwise be silently lost here too).
+        """
+        for parsed in mav.parse_frames(data):
+            if parsed.valid:
+                self._handle_one_message(parsed, addr)
+
+    def _handle_one_message(self, parsed, addr=None):
+        """Act only on our configured wipe command id, from a single already-
+        parsed MAVLink message."""
         if addr is not None:
             self._reply_addr = addr
 
