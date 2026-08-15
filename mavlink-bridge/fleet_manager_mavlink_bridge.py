@@ -171,7 +171,6 @@ class FleetManagerMAVLinkBridge(Node):
         except OSError as e:
             self.get_logger().warn(f'Failed to send MAVLink frame: {e}')
 
-
 def main(args=None):
     """Entry point for fleet manager MAVLink bridge."""
     rclpy.init(args=args)
