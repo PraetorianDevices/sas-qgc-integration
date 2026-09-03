@@ -185,7 +185,17 @@ class TestFrameHeaderStructure:
         assert parsed.msg_id == big_msg_id
 
     def test_parse_rejects_wrong_magic_byte(self):
-        assert mav.parse_frame(b'\xFE' + b'\x00' * 11) is None
+        # 0xFD is MAVLink 2.0 and 0xFE is MAVLink 1.0 -- both are legitimate
+        # start bytes, so a "wrong" magic byte has to be neither.
+        assert mav.parse_frame(bytes([0xAB]) + bytes(11)) is None
+
+    def test_parse_accepts_mavlink_v1_start_byte(self):
+        """0xFE frames must parse: QGC opens every link in MAVLink 1.0."""
+        frame = mav.parse_frame(bytes.fromhex('fe0431ffbe2c04000101fc9a'))
+        assert frame is not None
+        assert frame.msg_id == mav.MAVLINK_MSG_ID_MISSION_COUNT
+        assert frame.valid
+        assert mav.parse_mission_count(frame.payload)['count'] == 4
 
     def test_parse_rejects_short_buffer(self):
         assert mav.parse_frame(b'\xFD\x00\x00') is None

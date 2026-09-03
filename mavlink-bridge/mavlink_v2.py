@@ -33,6 +33,7 @@ from typing import Optional, NamedTuple
 
 
 MAVLINK_STX = 0xFD
+MAVLINK_STX_V1 = 0xFE
 
 # CRC_EXTRA per message, verified via pymavlink (crc_extra attribute of each
 # MAVLink_<name>_message class in pymavlink.dialects.v20.common).
@@ -79,7 +80,8 @@ MAVLINK_MSG_ID_BATTERY_STATUS = 147
 MAVLINK_MSG_ID_STATUSTEXT = 253
 MAVLINK_MSG_ID_OBSTACLE_DISTANCE = 330
 
-HEADER_LEN = 10  # bytes 0..9, i.e. everything before the payload
+HEADER_LEN = 10  # v2: bytes 0..9, i.e. everything before the payload
+HEADER_LEN_V1 = 6  # v1: STX, len, seq, sysid, compid, msgid (8-bit)
 CRC_LEN = 2
 
 
@@ -177,27 +179,61 @@ def build_frame(msg_id: int, seq: int, payload: bytes,
     return header_and_payload + struct.pack('<H', crc)
 
 
+def _frame_header_len(stx: int) -> Optional[int]:
+    """Header length implied by a frame's start byte, or None if not MAVLink."""
+    if stx == MAVLINK_STX:
+        return HEADER_LEN
+    if stx == MAVLINK_STX_V1:
+        return HEADER_LEN_V1
+    return None
+
+
 def parse_frame(data: bytes) -> Optional[ParsedFrame]:
-    """Parse a MAVLink 2.0 frame. Returns None if not a well-formed v2 frame."""
-    if len(data) < HEADER_LEN + CRC_LEN:
+    """Parse a MAVLink frame -- either 2.0 (STX 0xFD) or 1.0 (STX 0xFE).
+
+    Both versions must be accepted on receive: the GCS picks the version it
+    speaks, and QGroundControl in particular starts every link in MAVLink
+    1.0, only upgrading to 2.0 once it has seen a 2.0 frame from the vehicle.
+    Its entire opening exchange -- PARAM_REQUEST_LIST, MISSION_COUNT,
+    COMMAND_LONG -- therefore arrives as 1.0 frames. Accepting only 0xFD made
+    every one of those vanish at the STX check with no error anywhere, which
+    is what broke mission upload: QGC's MISSION_COUNT was silently discarded
+    and never answered, so QGC retried until it gave up with "mission write
+    mission count failed, maximum retries exceeded".
+
+    We still BUILD 2.0 frames (see build_frame) -- replying in 2.0 is both
+    spec-correct and what prompts QGC to upgrade the link.
+    """
+    if not data:
         return None
-    if data[0] != MAVLINK_STX:
+    header_len = _frame_header_len(data[0])
+    if header_len is None:
+        return None
+    if len(data) < header_len + CRC_LEN:
         return None
 
     payload_len = data[1]
-    seq = data[4]
-    system_id = data[5]
-    component_id = data[6]
-    msg_id = data[7] | (data[8] << 8) | (data[9] << 16)
+    if header_len == HEADER_LEN:
+        # v2: two flag bytes precede seq, and the message id is 24-bit.
+        seq = data[4]
+        system_id = data[5]
+        component_id = data[6]
+        msg_id = data[7] | (data[8] << 8) | (data[9] << 16)
+    else:
+        # v1: no flag bytes, and the message id is a single byte.
+        seq = data[2]
+        system_id = data[3]
+        component_id = data[4]
+        msg_id = data[5]
 
-    expected_len = HEADER_LEN + payload_len + CRC_LEN
+    expected_len = header_len + payload_len + CRC_LEN
     if len(data) < expected_len:
         return None
 
-    payload = data[HEADER_LEN:HEADER_LEN + payload_len]
-    crc = struct.unpack('<H', data[HEADER_LEN + payload_len:expected_len])[0]
+    payload = data[header_len:header_len + payload_len]
+    crc = struct.unpack('<H', data[header_len + payload_len:expected_len])[0]
 
-    computed_crc = compute_crc(data[1:HEADER_LEN + payload_len], msg_id)
+    computed_crc = compute_crc(data[1:header_len + payload_len], msg_id)
     valid = (crc == computed_crc)
 
     return ParsedFrame(
@@ -234,14 +270,17 @@ def parse_frames(data: bytes) -> list:
     frames = []
     offset = 0
     n = len(data)
-    while offset + HEADER_LEN + CRC_LEN <= n:
-        if data[offset] != MAVLINK_STX:
+    while offset < n:
+        header_len = _frame_header_len(data[offset])
+        if header_len is None:
+            break
+        if offset + header_len + CRC_LEN > n:
             break
         frame = parse_frame(data[offset:])
         if frame is None:
             break
         frames.append(frame)
-        offset += HEADER_LEN + data[offset + 1] + CRC_LEN
+        offset += header_len + data[offset + 1] + CRC_LEN
     return frames
 
 
