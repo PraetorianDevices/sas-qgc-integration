@@ -147,6 +147,8 @@ class MAVLinkRouterNode(Node):
                 self.get_logger().warn(f'Error in external receive loop: {e}')
                 continue
 
+            if addr != self._last_qgc_addr:
+                self.get_logger().info(f'External socket now receiving from {addr}')
             self._last_qgc_addr = addr
             self._forward_to_downstream(data)
 

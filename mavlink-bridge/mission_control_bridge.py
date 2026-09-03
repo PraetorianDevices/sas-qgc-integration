@@ -151,9 +151,19 @@ class MissionControlBridge(Node):
         self._upload_expected_count = 0
         self._upload_in_progress = False
 
-        # QoS profile
+        # QoS for the assembled-mission publisher. RELIABLE, not BEST_EFFORT:
+        # an uploaded mission is a single discrete payload that must not be
+        # dropped, and mission_executor_node subscribes to load_mission with
+        # default QoS (RELIABLE). Under DDS compatibility rules a RELIABLE
+        # subscriber never matches a BEST_EFFORT publisher, so the previous
+        # BEST_EFFORT setting meant a fully-received mission was published
+        # into the void -- rclpy logged "requesting incompatible QoS. No
+        # messages will be sent to it. Last incompatible policy: RELIABILITY"
+        # and the executor never saw a single upload. TRANSIENT_LOCAL is kept
+        # so an executor that starts late still receives the last mission
+        # (TRANSIENT_LOCAL publisher -> VOLATILE subscriber is compatible).
         qos = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
+            reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
             history=HistoryPolicy.KEEP_LAST,
             depth=1
@@ -211,9 +221,16 @@ class MissionControlBridge(Node):
         upload before this fix. See parse_frames()'s docstring for the full
         explanation.
         """
-        for parsed in mav.parse_frames(data):
+        frames = mav.parse_frames(data)
+        if not frames:
+            self.get_logger().warn(
+                f'parse_frames() found NO frames in {len(data)} bytes from {addr}: '
+                f'{data[:20].hex()}')
+        for parsed in frames:
             if parsed.valid:
                 self._handle_one_message(parsed, addr)
+            else:
+                self.get_logger().warn(f'Invalid/unparseable frame from {addr}: {data[:20]!r}')
 
     def _handle_one_message(self, parsed, addr=None):
         """Process a single already-parsed MAVLink message."""
