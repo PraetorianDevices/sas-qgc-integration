@@ -34,7 +34,11 @@ Usage:
 
 Parameters:
   system_id                   : MAVLink system ID (1-255, default 1)
-  drone_id                    : ROS 2 namespace for multi-drone (default empty for single drone)
+  drone_id                    : namespace for PX4 uXRCE-DDS topics (/fmu/...) -- leave empty for a
+                                  single SITL instance, which publishes them unprefixed
+  sas_namespace               : namespace the SAS control nodes run under (pass drone_1 to match
+                                  SAS/launch/single_drone.launch.py); used by mission_control and
+                                  emergency_wipe, which talk to those nodes rather than to PX4
   mavlink_port                : the single external UDP port QGC's comm link targets (default 14550) -- only mavlink_router_node binds this
   mavlink_host                : destination host outbound bridges send to / where QGC is reachable (default localhost).
                                   Set to the other host's address (e.g. a WSL2 default-gateway IP) when QGC runs in a
@@ -102,7 +106,24 @@ def generate_launch_description():
     drone_id_arg = DeclareLaunchArgument(
         'drone_id',
         default_value='',
-        description='ROS 2 namespace for this drone (empty for single drone)'
+        description='Namespace for PX4 uXRCE-DDS topics (/fmu/...). Leave empty '
+                    'for a single SITL instance, which publishes them unprefixed.'
+    )
+
+    sas_namespace_arg = DeclareLaunchArgument(
+        'sas_namespace',
+        default_value='',
+        description='ROS 2 namespace the SAS control nodes run under, used by the '
+                    'bridges that talk to those nodes (mission_control, '
+                    'emergency_wipe). Deliberately SEPARATE from drone_id: '
+                    'drone_id prefixes PX4 uXRCE-DDS topics (/fmu/...), which a '
+                    'single SITL instance publishes UNPREFIXED, while SAS/launch/'
+                    'single_drone.launch.py pushes its nodes under /drone_1. One '
+                    'shared value cannot satisfy both -- setting drone_id:=drone_1 '
+                    'to reach the SAS nodes silently breaks telemetry/collision by '
+                    'pointing them at /drone_1/fmu/... topics PX4 never publishes. '
+                    'For the standard single-SITL setup pass sas_namespace:=drone_1 '
+                    'and leave drone_id empty.'
     )
 
     mavlink_port_arg = DeclareLaunchArgument(
@@ -248,7 +269,7 @@ def generate_launch_description():
         parameters=[
             {'system_id': LaunchConfiguration('system_id')},
             {'component_id': 1},  # MAV_COMP_ID_AUTOPILOT
-            {'drone_id': LaunchConfiguration('drone_id')},
+            {'drone_id': LaunchConfiguration('sas_namespace')},
             {'mavlink_host': LaunchConfiguration('mavlink_host')},
             {'mavlink_bind_host': LaunchConfiguration('mavlink_bind_host')},
             {'mavlink_port': LaunchConfiguration('mission_control_listen_port')},
@@ -295,7 +316,7 @@ def generate_launch_description():
         parameters=[
             {'system_id': LaunchConfiguration('system_id')},
             {'component_id': 1},  # MAV_COMP_ID_AUTOPILOT
-            {'drone_id': LaunchConfiguration('drone_id')},
+            {'drone_id': LaunchConfiguration('sas_namespace')},
             {'mavlink_host': LaunchConfiguration('mavlink_host')},
             {'mavlink_bind_host': LaunchConfiguration('mavlink_bind_host')},
             {'mavlink_port': LaunchConfiguration('wipe_port')},
@@ -367,6 +388,7 @@ def generate_launch_description():
     return LaunchDescription([
         system_id_arg,
         drone_id_arg,
+        sas_namespace_arg,
         mavlink_port_arg,
         mavlink_host_arg,
         mavlink_bind_host_arg,
