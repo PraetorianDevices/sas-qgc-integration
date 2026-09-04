@@ -176,9 +176,11 @@ Mission Control Bridge:
 |-----------|------|---------|-------------|
 | `system_id` | int | 1 | MAVLink system ID |
 | `component_id` | int | 1 | MAVLink component ID |
-| `drone_id` | str | "" | ROS 2 namespace (empty = single drone) |
-| `mavlink_host` | str | localhost | Listen address |
-| `mavlink_port` | int | 14550 | UDP port |
+| `drone_id` | str | "" | Namespace for **PX4** uXRCE-DDS topics (`/fmu/...`). Leave empty for single SITL, which publishes them unprefixed |
+| `sas_namespace` | str | "" | Namespace the **SAS** nodes run under. Pass `drone_1` to match `single_drone.launch.py` — this is what the bridge prefixes `mission_executor/load_mission` with |
+| `mavlink_host` | str | localhost | Where QGC is reachable (outbound target) |
+| `mavlink_bind_host` | str | 0.0.0.0 | Local address the inbound socket binds |
+| `mavlink_port` | int | 14550 | External UDP port QGC's comm link targets |
 
 ---
 
@@ -201,29 +203,55 @@ The bridge supports multiple MAVLink coordinate frames:
 ### Single-Drone Setup
 
 ```bash
-# Launch complete integration (detector + telemetry + missions)
-ros2 launch mavlink-bridge launch_sas_qgc_integration.py system_id:=1
+# sas_namespace:=drone_1 is REQUIRED alongside SAS/launch/single_drone.launch.py.
+# Without it the bridge publishes the assembled mission to /mission_executor/load_mission
+# while the executor listens on /drone_1/mission_executor/load_mission -- the upload
+# succeeds at the MAVLink layer and is then silently dropped, with no error.
+ros2 launch mavlink-bridge launch_sas_qgc_integration.py \
+  system_id:=1 \
+  sas_namespace:=drone_1 \
+  mavlink_host:=<host-where-QGC-runs>
 
 # In QGC:
-# 1. Settings → Comm Links → Add → UDP
-# 2. Host: localhost, Port: 14550
+# 1. Settings → Comm Links → Add → UDP, Port: 14550
+# 2. Host: the address THIS stack is reachable at.
+#    Running under WSL2, that is the WSL2 interface IP (`ip addr show eth0`),
+#    NOT localhost -- WSL2's localhost forwarding silently drops UDP.
+#    Note the IP changes when WSL restarts.
 # 3. Click "Connect"
-# 4. Go to Plan tab → Create mission with waypoints
-# 5. Click "Upload" → Mission uploads to SAS
+# 4. Plan tab → create waypoints → "Upload"
+#    ("Plan was created for a different firmware/vehicle type" is benign -- click OK.)
 ```
+
+If PX4 SITL is the vehicle, also stop PX4's built-in mavlink instance once per boot, or it
+contends with `mavlink_router_node` for port 14550:
+
+```
+pxh> mavlink stop -u 18570
+```
+
+**Verified live:** a 5-waypoint QGC upload completes the full
+`MISSION_COUNT` → `MISSION_REQUEST_INT` × N → `MISSION_ACK` handshake and arrives in
+`mission_executor_node` ("Parsed QGC mission with 5 waypoints").
 
 ### Multi-Drone Setup
 
 ```bash
+# drone_id prefixes the PX4 topics; sas_namespace prefixes the SAS node topics.
+# With one PX4 instance per drone both are set; against a single unprefixed SITL,
+# drone_id stays empty (see the single-drone section above).
+
 # Drone 1
 ros2 launch mavlink-bridge launch_sas_qgc_integration.py \
   system_id:=1 \
-  drone_id:=drone_1
+  drone_id:=drone_1 \
+  sas_namespace:=drone_1
 
 # Drone 2 (different UDP port)
 ros2 launch mavlink-bridge launch_sas_qgc_integration.py \
   system_id:=2 \
   drone_id:=drone_2 \
+  sas_namespace:=drone_2 \
   mavlink_port:=14551
 ```
 

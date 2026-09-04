@@ -1,14 +1,35 @@
 # GPS Spoofing Detector → QGC Integration — Test Checklist
 
-## ⚠️ Read Before Running This Checklist
+## Status: Phase 5 (live QGC) has since been run — ✅ passed
 
-This checklist predates the Phase 0 MAVLink protocol audit (see `IMPLEMENTATION_STATUS.md`/`IMPLEMENTATION_ROADMAP.md`). Until that fix, `gps_spoof_mavlink_bridge.py` built a structurally invalid MAVLink 2.0 frame (a 7-byte header instead of the real 10-byte one) — **Phase 5 of this checklist (real QGroundControl connection) could not have passed if it was ever actually attempted**, because QGC's parser would not have recognized any packet the bridge sent. The bridge now produces verified, byte-for-byte-correct MAVLink 2.0 frames (checked against `pymavlink`), so Phase 5 is newly meaningful and is the top-priority thing to actually run.
+This checklist originally predated the Phase 0 MAVLink protocol audit, and warned that its
+Phase 5 (real QGroundControl connection) could not have passed, because the bridge was
+emitting structurally invalid MAVLink 2.0 frames that QGC's parser would never recognise.
+That is long fixed, and **Phase 5 has now actually been run against real QGroundControl and
+real PX4 SITL, successfully** — see `IMPLEMENTATION_STATUS.md` Part 5.
 
-This revision also fixes:
-- **Phase 2/3.3**: test names and file paths updated to match the current (real-module, real-socket) test suite — the old ones referenced a deleted file (`test_integration.py`) and tests that never actually drove the bridge.
-- **Phase 4.3**: the manual packet-parsing script used the old, wrong byte offsets (`msg_id` at byte 3, `seq` at byte 6). Fixed to the real 10-byte header layout, or every field it reports would now be silently wrong.
+Doing so found three further bugs on the GPS-spoofing/inbound path that this checklist's
+steps do not probe, and which are worth knowing about before you re-run it:
 
-`mavlink-bridge/test_gps_spoof_alert_generator.py` (the console script `setup.py` referenced) now exists — Phases 5.2/5.4/7.1 below can use `ros2 run mavlink-bridge test_gps_spoof_alert_generator [--count N] [--rate HZ] [--level LEVEL]` instead of the inline snippets. The inline snippets are left in place below as a no-build-required fallback.
+- **QGC speaks MAVLink 1.0 on link-up**, and the parser accepted only 2.0, so every inbound
+  message was discarded silently. Fixed — the parser now accepts both.
+- **QGC must target the WSL2 interface IP, not `localhost`.** WSL2's localhost forwarding
+  drops UDP. If Phase 5 appears to do nothing, check this first.
+- **PX4's own mavlink instance on port 18570 contends with `mavlink_router_node`** on 14550.
+  Run `mavlink stop -u 18570` at the `pxh>` prompt after every fresh SITL boot.
+
+Earlier revisions of this checklist also fixed:
+- **Phase 2/3.3**: test names and file paths updated to match the current (real-module,
+  real-socket) test suite — the old ones referenced a deleted file (`test_integration.py`)
+  and tests that never actually drove the bridge.
+- **Phase 4.3**: the manual packet-parsing script used the old, wrong byte offsets (`msg_id`
+  at byte 3, `seq` at byte 6), fixed to the real 10-byte header layout — otherwise every
+  field it reports would be silently wrong. Note it decodes **v2** frames; QGC's own
+  outbound traffic may be v1, with a 6-byte header.
+
+`mavlink-bridge/test_gps_spoof_alert_generator.py` exists, so Phases 5.2/5.4/7.1 can use
+`ros2 run mavlink-bridge test_gps_spoof_alert_generator [--count N] [--rate HZ] [--level LEVEL]`
+instead of the inline snippets. The inline snippets remain below as a no-build fallback.
 
 ---
 
@@ -603,7 +624,6 @@ _____________________________________________________________________
 ## References
 
 - [GPS_SPOOFING_QGC_INTEGRATION.md](GPS_SPOOFING_QGC_INTEGRATION.md) — Architecture and usage guide
-- [SAS_QGC_Integration_Plan.md](SAS_QGC_Integration_Plan.md) — High-level integration plan
 - [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) — Current implementation status, including the Phase 0 MAVLink protocol audit that motivated this checklist's revision
 - [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md) — Full project roadmap
 - `mavlink-bridge/mavlink_v2.py` — Verified MAVLink 2.0 codec shared by all bridges

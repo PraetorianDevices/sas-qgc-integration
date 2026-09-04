@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-Full implementation of `SAS_QGC_Integration_Plan.md`, excluding `gesture_bridge_node`'s QGC connection (per original scope). A subsequent protocol audit found the MAVLink layer had a showstopper wire-format bug across all three bridges, so a corrective phase (Phase 0) was inserted ahead of the original Phase 2/3 work. That phase is now complete. A separate, unrelated safety feature (gesture-gating) was also completed under its own plan — see Phase 1.5.
+Full implementation of the original SAS-QGC integration plan, excluding `gesture_bridge_node`'s QGC connection (per original scope). That plan document has been removed now that it is implemented; its durable part — which SAS nodes connect to QGC and why — is preserved in `IMPLEMENTATION_STATUS.md`. A subsequent protocol audit found the MAVLink layer had a showstopper wire-format bug across all three bridges, so a corrective phase (Phase 0) was inserted ahead of the original Phase 2/3 work. That phase is now complete. A separate, unrelated safety feature (gesture-gating) was also completed under its own plan — see Phase 1.5.
 
 **Phases:**
 0. **Phase 0 (✅ Complete):** MAVLink Wire Protocol Correctness — frame-format bug fixed in all 3 bridges, mission signing wired in, secure launch fixed, entire test suite now imports real modules
@@ -11,7 +11,9 @@ Full implementation of `SAS_QGC_Integration_Plan.md`, excluding `gesture_bridge_
 3. **Phase 2 (✅ Complete):** Remaining ROS 2 Bridges (Fleet Manager, Collision, Emergency Wipe)
 4. **Phase 3 (Not started):** QGC Custom Plugin
 5. **Phase 4 (✅ Complete for Phases 0/1/1.5/2):** Comprehensive Testing
-6. **Phase 5 (In progress — build/import verified, nothing launched yet):** Live ROS 2 Build & Validation
+6. **Phase 5 (✅ Complete):** Live ROS 2 Build & Validation — full stack run end to end against
+   real PX4 SITL and real QGroundControl, including an armed flight and a real mission
+   upload; seven bugs found that no stub-based test could catch
 
 ---
 
@@ -45,7 +47,7 @@ A line-by-line review, validated byte-for-byte against `pymavlink` as ground tru
 
 ## Phase 1.5: Gesture Safety Gating — ✅ COMPLETE
 
-Not part of the original `SAS_QGC_Integration_Plan.md`. While tracing mission-completion signaling for Phase 0/1 work, a real, confirmed safety gap was found: `gesture_bridge_node`'s detected gestures could immediately override an actively-running QGC-driven mission, with no gating anywhere in the pipeline. Implemented and fully tested under its own plan (`examine-the-sas-repository-precious-diffie.md`):
+Not part of the original integration plan. While tracing mission-completion signaling for Phase 0/1 work, a real, confirmed safety gap was found: `gesture_bridge_node`'s detected gestures could immediately override an actively-running QGC-driven mission, with no gating anywhere in the pipeline. Implemented and fully tested under its own plan (`examine-the-sas-repository-precious-diffie.md`):
 
 - **`fleet_manager_node.py`** — fleet-wide mission-state tracking; a gesture is only acted on if every configured drone currently reports `COMPLETED` or `IDLE`.
 - **`navigation_control_node.py`** — backstop rejecting gesture-sourced commands on `navigation_control/mission_command` while a mission is active, without blocking legitimate internal mission traffic sharing the same topic.
@@ -155,7 +157,7 @@ Cross-checked and confirmed no topical redundancy between mavlink-bridge tests a
 
 ---
 
-## Phase 5: Live ROS 2 Build & Validation — IN PROGRESS
+## Phase 5: Live ROS 2 Build & Validation — ✅ COMPLETE
 
 The first real ROS 2 environment used in this whole project (WSL Ubuntu 24.04, ROS 2 Jazzy, `colcon`) — as opposed to the stubbed `rclpy`/`px4_msgs` every unit/integration test uses — surfaced real bugs that stubs cannot catch, since a stub supplies exactly the attributes the code expects rather than modeling what real tooling and real message schemas actually contain.
 
@@ -182,8 +184,35 @@ None of these were caught by 201 passing unit/integration tests, since none of t
 - `VehicleStatus.system_status`, `VehicleStatus.load`, `VehicleAttitude.rollspeed`/`pitchspeed`/`yawspeed`, and `BatteryStatus.energy_consumed_j` are not real px4_msgs fields — confirmed absent as far back as v1.14.0 (2023), not a version-specific rename. Would have raised `AttributeError` on the very first real `VehicleAttitude`/`VehicleStatus` callback, at any point in this bridge's history. **Fixed**: angular rates now sourced from a new `VehicleAngularVelocity` subscription (`xyz`), CPU load from a new `Cpuload` subscription (`load`), heartbeat state simplified to arming-state-only, `energy_consumed` reported as MAVLink's documented unknown sentinel (`-1`). 4 new regression tests (`test_telemetry_conversion.py`: 18 → 22).
 - Checked SAS's own px4_msgs usage for the same class of bug (`grep` for the four confirmed-bad field names across `SAS/my_python_package`) — no other occurrences found.
 
-### Not yet done
-Nothing has been launched — no node started, no PX4 SITL run, no QGroundControl opened, no `ros2 launch` beyond `--show-args`. That's the next step.
+### Live run — completed, and what it found
+
+The stack has since been run for real, repeatedly: PX4 SITL + Gazebo, the uXRCE-DDS bridge,
+the SAS control nodes and all seven MAVLink bridges, with real QGroundControl on Windows as
+the far end. It included a genuine armed flight (climb to 5 m, hold, commanded land,
+auto-disarm) and a genuine QGC mission upload arriving in `mission_executor_node`.
+
+Seven bugs surfaced that stub-based testing structurally could not catch. They are
+documented in full in `IMPLEMENTATION_STATUS.md` Part 5; in brief:
+
+1. `single_drone.launch.py` passed `drone_id` to `offboard_controller_node`, pointing it at
+   `/drone_1/fmu/...` topics PX4 never publishes — arm/takeoff hung on "No position data".
+2. Only the first MAVLink message in a bundled datagram was parsed; the rest were dropped
+   silently. Fixed with `parse_frames()`.
+3. **MAVLink 1.0 frames were rejected outright.** QGC opens every link in v1, so its whole
+   opening exchange — including `MISSION_COUNT` — vanished at the magic-byte check. This was
+   the actual cause of QGC's "mission write mission count failed, maximum retries exceeded".
+4. `load_mission` was published `BEST_EFFORT` against a `RELIABLE` subscriber, so a fully
+   received mission was dropped by DDS.
+5. `drone_id` was overloaded across the PX4 and SAS namespaces, which cannot share one
+   value. Split into `drone_id` + `sas_namespace`.
+6. `emergency_wipe_node` used absolute names and so escaped its namespace, breaking both the
+   bridge lookup and multi-drone entirely.
+7. PX4's built-in mavlink instance (port 18570) contends with the router on 14550 and must
+   be stopped on each boot.
+
+It also **disproved a long-standing assumption**: WSL2 NAT inbound UDP is *not* broken at
+the platform level. A raw packet to the WSL2 interface IP was delivered end to end; only the
+`localhost` path drops UDP. QGC simply has to target the interface IP.
 
 ---
 
@@ -196,10 +225,22 @@ Nothing has been launched — no node started, no PX4 SITL run, no QGroundContro
 - ✅ Phase 2 follow-up: inbound single-UDP-port limitation resolved via `mavlink_router_node.py`, with no code changes to either existing inbound bridge
 - ✅ Phase 2 follow-up: DDS-Security enclaves generated and tailored to least-privilege for all 7 mavlink-bridge nodes, verified cryptographically
 - ✅ Phase 2 follow-up: security wired into `launch_sas_qgc_integration.py` via an opt-in `enable_security` arg, verified with the real `ros2 launch` tool
-- ✅ Phase 5 (in progress): both packages now `colcon build` cleanly in a real ROS 2 workspace; 4 real packaging bugs found and fixed; `px4_msgs` built from source, revealing (and fixing) real field-mismatch bugs in `telemetry_mavlink_bridge.py` that no stub-based test could have caught
+- ✅ Phase 5: both packages `colcon build` cleanly in a real ROS 2 workspace; 4 packaging bugs
+  found and fixed; `px4_msgs` built from source, revealing real field-mismatch bugs in
+  `telemetry_mavlink_bridge.py`; then the full stack run live against PX4 SITL and real
+  QGroundControl, finding and fixing 7 further bugs and validating all 10 QGC-facing
+  components (see `IMPLEMENTATION_STATUS.md` Part 5)
 
 ### Now / Next
-- **Actually launch the stack.** PX4 SITL is already built, QGroundControl is already installed, both ROS 2 packages now colcon-build cleanly — the next step is a real `ros2 launch mavlink-bridge launch_sas_qgc_integration.py` run, the first genuine end-to-end execution this project has had. This is also the first chance to confirm `enable_security:=true` actually starts nodes under DDS-Security enforcement, not just sets env vars correctly.
+- **Wire `emergency_wipe_node` into the launch files.** It is in none of them, so the wipe
+  feature is inert in a normal bring-up (the bridge answers QGC "service unavailable"); it
+  had to be started by hand to verify. Also decide whether `STUB_MODE` stays on outside
+  testing.
+- **Make the QGC link durable.** It depends on the WSL2 interface IP, which changes on
+  restart. Either switch WSL2 to mirrored networking (so `localhost` works) or script the
+  Comm Link host.
+- **Run DDS-Security through to enforcement.** `enable_security:=true` is confirmed to set
+  the right env vars, but no node has yet started under `ROS_SECURITY_STRATEGY=Enforce`.
 
 ### Later
 - Phase 3: QGC Plugin (separate session, requires Qt/QML/C++)
@@ -256,13 +297,19 @@ mavlink-bridge/
 ### Phase 2/3 Complete When: (unchanged from prior roadmap — not yet reached)
 
 ### Before calling any of this "production-ready" (not yet done):
-- [ ] Full stack launched against real QGroundControl and PX4 (SITL or hardware) in a real ROS 2 environment
+- [x] Full stack launched against real QGroundControl and PX4 SITL in a real ROS 2
+      environment — all 10 QGC-facing components verified live (Phase 5). Not yet run
+      against real hardware.
 - [x] DDS-Security enclaves generated and tailored to least-privilege for the 7 mavlink-bridge nodes
 - [x] Security wired into `launch_sas_qgc_integration.py` (opt-in `enable_security` arg, verified with the real `ros2 launch` tool)
 - [x] Both packages (`my_python_package`, `mavlink-bridge`) colcon-build cleanly in a real ROS 2 workspace, with all executables/launch files discoverable by package name (Phase 5)
 - [x] `px4_msgs` built from source and importable by the bridges that need it at runtime
-- [ ] `enable_security:=true` actually run through to nodes starting under DDS-Security enforcement (verified so far only that the env vars/log message are correct — the packages weren't installed yet when that was checked; worth re-verifying now that they are)
-- [ ] Nodes actually launched and run against PX4 SITL / QGroundControl (both already built/installed in this environment, per Phase 5, but never started)
+- [ ] `enable_security:=true` actually run through to nodes starting under DDS-Security
+      enforcement (still verified only as far as the env vars/log message being correct)
+- [ ] `emergency_wipe_node` present in a launch file, and a decision on whether `STUB_MODE`
+      stays on outside testing — the wipe path is verified, but inert in a normal bring-up
+- [x] Nodes actually launched and run against PX4 SITL / QGroundControl — done, repeatedly,
+      including an armed flight and a real QGC mission upload (Phase 5)
 
 ---
 

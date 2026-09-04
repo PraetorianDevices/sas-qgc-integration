@@ -212,7 +212,7 @@ Read in roughly this order:
 
 | File | What it's for |
 | --- | --- |
-| [SAS_QGC_Integration_Plan.md](SAS_QGC_Integration_Plan.md) | **Start here.** Original analysis: which SAS nodes should connect to QGC and the architecture for doing it |
+| [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) | **Start here.** Current status, what is verified live, the operational requirements for launching, and which SAS nodes connect to QGC and why |
 | [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md) | Phased plan (0, 1, 1.5, 2, 3) with per-phase status |
 | [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) | Current state, bridge-by-bridge protocol verification table |
 | [GPS_SPOOFING_QGC_INTEGRATION.md](GPS_SPOOFING_QGC_INTEGRATION.md) | Spoof detector → STATUSTEXT design |
