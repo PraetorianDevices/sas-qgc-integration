@@ -550,7 +550,7 @@ EOF
 ### 8.1 Documentation Check
 
 - [ ] README.md has quickstart section
-- [ ] GPS_SPOOFING_QGC_INTEGRATION.md covers all integration points
+- [ ] MAVLINK_BRIDGES_QGC_INTEGRATION.md covers all integration points
 - [ ] Launch file is well-documented with examples
 - [ ] Parameters are documented with defaults
 - [ ] Error messages in bridge are clear and actionable
@@ -623,7 +623,7 @@ _____________________________________________________________________
 
 ## References
 
-- [GPS_SPOOFING_QGC_INTEGRATION.md](GPS_SPOOFING_QGC_INTEGRATION.md) — Architecture and usage guide
+- [MAVLINK_BRIDGES_QGC_INTEGRATION.md](MAVLINK_BRIDGES_QGC_INTEGRATION.md) — Architecture and usage guide (GPS spoofing, mission control, telemetry)
 - [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) — Current implementation status, including the Phase 0 MAVLink protocol audit that motivated this checklist's revision
 - [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md) — Full project roadmap
 - `mavlink-bridge/mavlink_v2.py` — Verified MAVLink 2.0 codec shared by all bridges

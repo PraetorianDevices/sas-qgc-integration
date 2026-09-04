@@ -213,29 +213,30 @@ Read in roughly this order:
 | File | What it's for |
 | --- | --- |
 | [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) | **Start here.** Current status, what is verified live, the operational requirements for launching, and which SAS nodes connect to QGC and why |
-| [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md) | Phased plan (0, 1, 1.5, 2, 3) with per-phase status |
-| [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) | Current state, bridge-by-bridge protocol verification table |
-| [GPS_SPOOFING_QGC_INTEGRATION.md](GPS_SPOOFING_QGC_INTEGRATION.md) | Spoof detector → STATUSTEXT design |
-| [OFFBOARD_CONTROLLER_QGC_INTEGRATION.md](OFFBOARD_CONTROLLER_QGC_INTEGRATION.md) | Telemetry bridge design |
-| [MISSION_EXECUTOR_QGC_INTEGRATION.md](MISSION_EXECUTOR_QGC_INTEGRATION.md) | Bidirectional mission control design |
+| [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md) | Phased plan (0, 1, 1.5, 2, 3, 5) with per-phase status |
+| [MAVLINK_BRIDGES_QGC_INTEGRATION.md](MAVLINK_BRIDGES_QGC_INTEGRATION.md) | GPS spoofing, mission control, and telemetry bridge reference |
 | [INTEGRATION_TEST_CHECKLIST.md](INTEGRATION_TEST_CHECKLIST.md) | Manual end-to-end validation steps (note its own "read before running" caveat) |
 | REPOSITORY_STRUCTURE.md | This file |
 
-**Phase status at a glance:** Phases 0, 1, 1.5, and 2 are complete — all seven
+**Phase status at a glance:** Phases 0, 1, 1.5, 2, and 5 are complete — all seven
 bridge/router nodes exist and are protocol-verified, mission signing is wired
-into the live upload path, and the full test suite runs against real modules.
-**Phase 3 (the QGC custom plugin) has not been started** — hence
-`qgc-plugin/` containing only a README.
+into the live upload path, the full test suite runs against real modules, and
+the whole stack has been run live against real PX4 SITL and real
+QGroundControl (armed flight, real mission upload). **Phase 3 (the QGC custom
+plugin) has not been started** — hence `qgc-plugin/` containing only a README.
 
 ---
 
 ## 7. Gotchas worth knowing
 
-- **`SAS/.gitignore` ignores `launch/` and `security/` wholesale.** So
-  `launch/secure_launch.py`, `security/mission_signer.py`, `security/keystore/`,
-  and `mission_signing.pem` exist on disk but are **not tracked** — the two
-  launch files that *are* tracked were force-added. Don't assume a fresh clone
-  of SAS gives you a working secure launch or signing key.
+- **`SAS/.gitignore` ignores `security/` wholesale.** So
+  `security/mission_signer.py`, `security/keystore/`, and `mission_signing.pem`
+  exist on disk but are **not tracked**. Don't assume a fresh clone of SAS
+  gives you a working signing key or keystore. (`launch/` used to be ignored
+  wholesale too — a bare `launch/` pattern with no leading slash matches at
+  any depth, so it silently caught the real `SAS/launch/` source directory,
+  including `single_drone.launch.py`. Fixed: that pattern is gone, and
+  `launch/` is now tracked normally.)
 - **Three independent git histories.** Committing in the outer repo does not
   commit submodule changes; each has its own `develop`. Clone with
   `--recurse-submodules`; update with `git submodule update --remote`.

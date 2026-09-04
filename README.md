@@ -86,7 +86,5 @@ WSL2's localhost forwarding drops UDP silently, and the IP changes on WSL restar
 | [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) | **Start here.** Current status, what is verified live, operational requirements, known limitations |
 | [docs/IMPLEMENTATION_ROADMAP.md](docs/IMPLEMENTATION_ROADMAP.md) | Phase-by-phase history and what remains |
 | [docs/REPOSITORY_STRUCTURE.md](docs/REPOSITORY_STRUCTURE.md) | Repository and package layout |
-| [docs/OFFBOARD_CONTROLLER_QGC_INTEGRATION.md](docs/OFFBOARD_CONTROLLER_QGC_INTEGRATION.md) | Telemetry bridge reference |
-| [docs/MISSION_EXECUTOR_QGC_INTEGRATION.md](docs/MISSION_EXECUTOR_QGC_INTEGRATION.md) | Mission upload/download bridge reference |
-| [docs/GPS_SPOOFING_QGC_INTEGRATION.md](docs/GPS_SPOOFING_QGC_INTEGRATION.md) | GPS spoofing alert bridge reference |
+| [docs/MAVLINK_BRIDGES_QGC_INTEGRATION.md](docs/MAVLINK_BRIDGES_QGC_INTEGRATION.md) | Per-bridge reference: GPS spoofing alerts, mission upload/download, telemetry |
 | [docs/INTEGRATION_TEST_CHECKLIST.md](docs/INTEGRATION_TEST_CHECKLIST.md) | Manual test procedure for the GPS spoofing path |
