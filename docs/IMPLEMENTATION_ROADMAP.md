@@ -232,10 +232,9 @@ the platform level. A raw packet to the WSL2 interface IP was delivered end to e
   components (see `IMPLEMENTATION_STATUS.md` Part 5)
 
 ### Now / Next
-- **Wire `emergency_wipe_node` into the launch files.** It is in none of them, so the wipe
-  feature is inert in a normal bring-up (the bridge answers QGC "service unavailable"); it
-  had to be started by hand to verify. Also decide whether `STUB_MODE` stays on outside
-  testing.
+- **Decide whether `STUB_MODE` stays on outside testing.** `emergency_wipe_node` is now
+  wired into both launch files, so the bridge can reach it in a normal bring-up — but
+  `STUB_MODE = True` still suppresses execution, so nothing is ever actually wiped.
 - **Make the QGC link durable.** It depends on the WSL2 interface IP, which changes on
   restart. Either switch WSL2 to mirrored networking (so `localhost` works) or script the
   Comm Link host.
@@ -306,8 +305,10 @@ mavlink-bridge/
 - [x] `px4_msgs` built from source and importable by the bridges that need it at runtime
 - [ ] `enable_security:=true` actually run through to nodes starting under DDS-Security
       enforcement (still verified only as far as the env vars/log message being correct)
-- [ ] `emergency_wipe_node` present in a launch file, and a decision on whether `STUB_MODE`
-      stays on outside testing — the wipe path is verified, but inert in a normal bring-up
+- [x] `emergency_wipe_node` present in both `single_drone.launch.py` and
+      `multi_drone.launch.py`, verified with a real launch
+- [ ] A decision on whether `STUB_MODE` stays on outside testing — the wipe path is fully
+      wired and verified, but still never actually executes
 - [x] Nodes actually launched and run against PX4 SITL / QGroundControl — done, repeatedly,
       including an armed flight and a real QGC mission upload (Phase 5)
 

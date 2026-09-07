@@ -218,11 +218,9 @@ Point QGC at the WSL2 interface IP and inbound works.
 ## What Is NOT Ready
 
 - ⏳ **QGC Custom Plugin (Phase 3)** — not started; requires C++/Qt/QML.
-- ⏳ **Emergency wipe is inert in a normal bring-up.** `emergency_wipe_node` is not in any
-  launch file, so a standard stack start does not include it and the bridge answers QGC
-  "service unavailable". It was started by hand (`ros2 run my_python_package
-  emergency_wipe_node --ros-args -r __ns:=/drone_1`) to verify the path.
-- ⏳ **The wipe never actually wipes.** `STUB_MODE = True` suppresses execution by design.
+- ⏳ **The wipe never actually wipes.** `emergency_wipe_node` is now wired into
+  `single_drone.launch.py`/`multi_drone.launch.py`, so a standard bring-up includes it and
+  the bridge can reach the service. But `STUB_MODE = True` still suppresses execution.
   Going live requires populating `DATA_LOCATIONS` and removing the guard, per the node's own
   docstring — deliberately not done.
 - ⏳ **DDS-Security has never been run through to enforcement.** `enable_security:=true` is
