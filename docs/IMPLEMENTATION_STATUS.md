@@ -1,6 +1,6 @@
 # SAS-QGC Integration: Implementation Status Report
 
-**Last Updated:** 2026-09-04
+**Last Updated:** 2026-09-08
 **Overall Status:** Phases 0, 1, 1.5, 2 and 5 are complete. All seven bridges are verified
 against pymavlink, mission signing is wired into the live upload path, secure_launch.py is
 fixed, and the full mavlink-bridge suite (208 tests) plus the SAS unit suite (1215 tests)
@@ -191,7 +191,7 @@ Point QGC at the WSL2 interface IP and inbound works.
 | `mavlink_router_node` | logged fan-out of real QGC datagrams to both inbound bridges, and relayed their replies back |
 | `mission_control_bridge` | real QGC mission upload: `MISSION_COUNT` → 5 × `MISSION_ITEM_INT` → assembled and published |
 | `mission_executor_node` | received that upload: "Parsed QGC mission with 5 waypoints" |
-| `emergency_wipe_mavlink_bridge` | real `COMMAND_LONG`: gate correctly DENIES wrong magic param and DENIES `confirmation=0`, ACCEPTS a valid command, invokes the service, reports back over `STATUSTEXT` (STUB_MODE on throughout — nothing was wiped) |
+| `emergency_wipe_mavlink_bridge` | real `COMMAND_LONG`: gate correctly DENIES wrong magic param and DENIES `confirmation=0`, ACCEPTS a valid command, invokes the service, reports back over `STATUSTEXT` (STUB_MODE on throughout — nothing was wiped). Re-verified after `emergency_wipe_node` was wired into `single_drone.launch.py`/`multi_drone.launch.py` — identical results through the actual production launch path, not a manual `ros2 run` workaround |
 | `offboard_controller_node` | real armed flight in Gazebo: climb to 5 m, hold, commanded land, auto-disarm |
 | `navigation_control_node` | drove that arm → takeoff → land sequence |
 
@@ -286,9 +286,10 @@ sensor I/O with no operator relevance.
 
 ## Immediate Next Steps (Priority Order)
 
-1. **Decide the emergency-wipe deployment story** — add `emergency_wipe_node` to
-   `single_drone.launch.py` (and `multi_drone.launch.py`) so the feature exists in a normal
-   bring-up, and decide whether `STUB_MODE` stays on outside of testing.
+1. **Decide whether `STUB_MODE` stays on outside of testing.** `emergency_wipe_node` is now
+   wired into both launch files and re-verified end-to-end through the real launch path (see
+   Part 5's verification table) — the only remaining question is whether/when to populate
+   real `DATA_LOCATIONS` and flip the guard.
 2. **Make the QGC link durable** — either switch WSL2 to mirrored networking so `localhost`
    works, or script the Comm Link host so it survives a WSL IP change.
 3. **Run DDS-Security through to enforcement** — start the stack with
@@ -305,8 +306,10 @@ sensor I/O with no operator relevance.
 3. **MAVLink-uploaded missions are unsigned.** The mission protocol has no signature
    transport, so `load_mission_callback` accepts unsigned missions by design
    (`strict=False`). Signature verification only protects missions that carry one.
-4. **Emergency wipe is not wired into any launch file and runs in STUB_MODE** — see "What Is
-   NOT Ready".
+4. **Emergency wipe is wired in and verified, but still runs in `STUB_MODE`** — see "What Is
+   NOT Ready". `DATA_LOCATIONS` is currently two placeholder paths under `/tmp/sas/` that
+   don't exist on disk, so flipping `STUB_MODE` off today would be a no-op (nothing to wipe);
+   it only becomes consequential once real paths are populated there.
 5. **The QGC link depends on a dynamic WSL2 IP** — see "Operational Requirements".
 6. **Style debt in SAS:** 356 `E501` (line length) and 21 `D401` (docstring imperative mood)
    findings remain, deliberately left as judgment calls rather than mass-rewritten. 17
