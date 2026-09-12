@@ -271,21 +271,21 @@ Preserved from the original integration plan (now fully implemented, so that doc
 been removed). 7 of 15 SAS nodes are QGC-facing; the other 8 are internal plumbing or
 sensor I/O with no operator relevance.
 
-| Node | Connected | Route |
-|---|---|---|
-| `mission_executor_node` | ✅ yes | mission upload/download, progress |
-| `offboard_controller_node` | ✅ yes | primary telemetry (position, attitude, battery) |
-| `gps_spoof_detector_node` | ✅ yes | security alerts via `STATUSTEXT` |
-| `fleet_manager_node` | ✅ yes | per-drone fleet status |
-| `collision_offboard_controller_node` | ✅ yes | `OBSTACLE_DISTANCE` |
-| `emergency_wipe_node` | ✅ yes | gated `COMMAND_LONG` → wipe service |
-| `gesture_bridge_node` | optional | deliberately out of scope; failsafe override only |
-| `navigation_control_node` | no need | internal; abstracted by `mission_executor` |
-| `sf45_px4_node` | no need | already feeds PX4; exposed via collision bridge |
-| `hand_gesture_node` | no need | internal input |
-| `image_src_node` / `image_zoom_src_node` | no need | internal sensors |
-| `odometry_control_node` | no need | internal sensor fusion; PX4 handles output |
-| `test_node` / `mission_test_interface` | no need | development tooling |
+| Node | Connected | Route | Why no need |
+|---|---|---|---|
+| `mission_executor_node` | ✅ yes | mission upload/download, progress | — |
+| `offboard_controller_node` | ✅ yes | primary telemetry (position, attitude, battery) | — |
+| `gps_spoof_detector_node` | ✅ yes | security alerts via `STATUSTEXT` | — |
+| `fleet_manager_node` | ✅ yes | per-drone fleet status | — |
+| `collision_offboard_controller_node` | ✅ yes | `OBSTACLE_DISTANCE` | — |
+| `emergency_wipe_node` | ✅ yes | gated `COMMAND_LONG` → wipe service | — |
+| `gesture_bridge_node` | optional | — | Deliberately out of scope for this integration; it's a failsafe override input, not something an operator needs to see/drive from QGC. |
+| `navigation_control_node` | no need | — | Internal plumbing. `mission_executor_node` is the single QGC-facing choke point for mission traffic; it drives `navigation_control_node` over ROS 2 topics, so QGC never needs a direct path to it. Also doubles as the gesture-gating safety backstop (Part 4). |
+| `sf45_px4_node` | no need | — | Raw LiDAR serial driver — its data already reaches PX4 directly, and `collision_mavlink_bridge` is what exposes that sweep to QGC as `OBSTACLE_DISTANCE`. A second QGC-facing path would just duplicate the same data. |
+| `hand_gesture_node` | no need | — | Camera-based gesture recognition; a pure internal input that feeds `fleet_manager_node`, not something QGC observes or controls directly. |
+| `image_src_node` / `image_zoom_src_node` | no need | — | Raw camera capture nodes feeding `hand_gesture_node`; internal sensor plumbing with no operator-facing telemetry of their own. |
+| `odometry_control_node` | no need | — | Visual/inertial sensor fusion feeding PX4's EKF. PX4 already reports the fused result (position, attitude) via `telemetry_mavlink_bridge`, so exposing this node's raw output separately would just be redundant. |
+| `test_node` / `mission_test_interface` | no need | — | Development/testing tooling, not part of the runtime flight stack at all. |
 
 ---
 
