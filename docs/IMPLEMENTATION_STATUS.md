@@ -280,12 +280,12 @@ sensor I/O with no operator relevance.
 | `collision_offboard_controller_node` | ✅ yes | `OBSTACLE_DISTANCE` |
 | `emergency_wipe_node` | ✅ yes | gated `COMMAND_LONG` → wipe service |
 | `gesture_bridge_node` | optional | deliberately out of scope; failsafe override only |
-| `navigation_control_node` | ✗ no | internal; abstracted by `mission_executor` |
-| `sf45_px4_node` | ✗ no | already feeds PX4; exposed via collision bridge |
-| `hand_gesture_node` | ✗ no | internal input |
-| `image_src_node` / `image_zoom_src_node` | ✗ no | internal sensors |
-| `odometry_control_node` | ✗ no | internal sensor fusion; PX4 handles output |
-| `test_node` / `mission_test_interface` | ✗ no | development tooling |
+| `navigation_control_node` | no need | internal; abstracted by `mission_executor` |
+| `sf45_px4_node` | no need | already feeds PX4; exposed via collision bridge |
+| `hand_gesture_node` | no need | internal input |
+| `image_src_node` / `image_zoom_src_node` | no need | internal sensors |
+| `odometry_control_node` | no need | internal sensor fusion; PX4 handles output |
+| `test_node` / `mission_test_interface` | no need | development tooling |
 
 ---
 
