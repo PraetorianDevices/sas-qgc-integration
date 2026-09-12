@@ -1,6 +1,6 @@
 # SAS-QGC Integration: Implementation Status Report
 
-**Last Updated:** 2026-09-08
+**Last Updated:** 2026-09-12
 **Overall Status:** Phases 0, 1, 1.5, 2 and 5 are complete. All seven bridges are verified
 against pymavlink, mission signing is wired into the live upload path, secure_launch.py is
 fixed, and the full mavlink-bridge suite (208 tests) plus the SAS unit suite (1215 tests)
@@ -192,6 +192,7 @@ Point QGC at the WSL2 interface IP and inbound works.
 | `mission_control_bridge` | real QGC mission upload: `MISSION_COUNT` → 5 × `MISSION_ITEM_INT` → assembled and published |
 | `mission_executor_node` | received that upload: "Parsed QGC mission with 5 waypoints" |
 | `emergency_wipe_mavlink_bridge` | real `COMMAND_LONG`: gate correctly DENIES wrong magic param and DENIES `confirmation=0`, ACCEPTS a valid command, invokes the service, reports back over `STATUSTEXT` (STUB_MODE on throughout — nothing was wiped). Re-verified after `emergency_wipe_node` was wired into `single_drone.launch.py`/`multi_drone.launch.py` — identical results through the actual production launch path, not a manual `ros2 run` workaround |
+| `EmergencyWipe` (the actual overwrite logic, `other_code/EmergencyWipe/emergency_wipe.py`) | Called directly with `locations` overridden to one isolated throwaway file — bypasses both `DATA_LOCATIONS` and `STUB_MODE` (neither is consulted when `locations` is passed explicitly), so no tracked source needed touching. `dry_run()` confirmed scope was exactly that one file before `execute()` ran. Result: `total_files=1, success_count=1`; a hexdump afterward confirmed the content was genuinely randomized and unrecoverable, while the file itself survived under its original name/size. This found and fixed a real docstring bug: the module's own top-of-file summary described a final zero-fill-then-delete step that was never implemented — overwrite-in-place, preserving the file, is the correct and intended behavior. |
 | `offboard_controller_node` | real armed flight in Gazebo: climb to 5 m, hold, commanded land, auto-disarm |
 | `navigation_control_node` | drove that arm → takeoff → land sequence |
 
@@ -218,11 +219,15 @@ Point QGC at the WSL2 interface IP and inbound works.
 ## What Is NOT Ready
 
 - ⏳ **QGC Custom Plugin (Phase 3)** — not started; requires C++/Qt/QML.
-- ⏳ **The wipe never actually wipes.** `emergency_wipe_node` is now wired into
+- ⏳ **The wipe is not enabled for production, though the overwrite logic itself is now
+  verified correct.** `emergency_wipe_node` is wired into
   `single_drone.launch.py`/`multi_drone.launch.py`, so a standard bring-up includes it and
-  the bridge can reach the service. But `STUB_MODE = True` still suppresses execution.
-  Going live requires populating `DATA_LOCATIONS` and removing the guard, per the node's own
-  docstring — deliberately not done.
+  the bridge can reach the service. `STUB_MODE = True` still suppresses execution through
+  that path — but the underlying `EmergencyWipe.execute()` has been proven against a real
+  file (see the verification table above): it genuinely, irrecoverably randomizes file
+  content in place rather than deleting the file, which is the intended behavior. Going
+  live for real still requires populating `DATA_LOCATIONS` and flipping `STUB_MODE`, per the
+  node's own docstring — deliberately not done.
 - ⏳ **DDS-Security has never been run through to enforcement.** `enable_security:=true` is
   confirmed to set the right env vars and log the right message, but no node has been
   started under `ROS_SECURITY_STRATEGY=Enforce`.
