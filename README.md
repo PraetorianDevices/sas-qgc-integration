@@ -76,8 +76,10 @@ ros2 launch mavlink-bridge launch_sas_qgc_integration.py \
 ```
 
 In QGC, add a UDP Comm Link on port 14550 pointing at the address **this stack** runs on.
-Under WSL2 that must be the WSL2 interface IP (`ip addr show eth0`), not `localhost` —
-WSL2's localhost forwarding drops UDP silently, and the IP changes on WSL restart.
+Under WSL2 that must be the WSL2 interface IP, not `localhost` — WSL2's localhost forwarding
+drops UDP silently, and the IP changes on WSL restart. Run
+`scripts/sync_qgc_link_ip.ps1` (with QGC closed) before each launch to keep that Comm Link's
+saved IP in sync automatically, instead of editing it by hand in QGC's UI every time.
 
 ## Documentation
 

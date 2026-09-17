@@ -1,6 +1,6 @@
 # SAS-QGC Integration: Implementation Status Report
 
-**Last Updated:** 2026-09-12
+**Last Updated:** 2026-09-17
 **Overall Status:** Phases 0, 1, 1.5, 2 and 5 are complete. All seven bridges are verified
 against pymavlink, mission signing is wired into the live upload path, secure_launch.py is
 fixed, and the full mavlink-bridge suite (208 tests) plus the SAS unit suite (1215 tests)
@@ -248,9 +248,13 @@ These are not optional niceties; each one silently breaks the integration if mis
    ```
 
 2. **Point QGC's Comm Link at the WSL2 interface IP, not `localhost`.** WSL2's
-   localhost-forwarding shim drops UDP silently; the interface IP works. Find it with
-   `ip addr show eth0`. **This IP changes when WSL restarts**, so the link needs updating
-   after a restart — or switch WSL to mirrored networking mode to make `localhost` work.
+   localhost-forwarding shim drops UDP silently; the interface IP works. **This IP changes
+   when WSL restarts**, so the link goes stale on every restart. Run
+   `scripts/sync_qgc_link_ip.ps1` (with QGC closed) before launching QGC — it finds the
+   current WSL2 interface IP itself, locates the UDP Comm Link on port 14550 in
+   `QGroundControl.ini`, and rewrites its host, backing up the ini first. It updates an
+   existing link; it does not create one, so the link must have been created once already
+   via QGC's own UI (Application Settings → Comm Links → Add → UDP, port 14550).
 
 3. **Set `mavlink_host` to the WSL2 default gateway** (`ip route | grep default`) — that is
    where the Windows host, and therefore QGC, is reachable from inside WSL2.
@@ -291,12 +295,17 @@ sensor I/O with no operator relevance.
 
 ## Immediate Next Steps (Priority Order)
 
-1. **Decide whether `STUB_MODE` stays on outside of testing.** `emergency_wipe_node` is now
-   wired into both launch files and re-verified end-to-end through the real launch path (see
-   Part 5's verification table) — the only remaining question is whether/when to populate
-   real `DATA_LOCATIONS` and flip the guard.
-2. **Make the QGC link durable** — either switch WSL2 to mirrored networking so `localhost`
-   works, or script the Comm Link host so it survives a WSL IP change.
+1. **`STUB_MODE` stays on for now** — a deliberate decision, not an open question. The wipe
+   path is fully wired and verified (both the gate and the overwrite logic itself, per Part
+   5); going live for real still requires populating `DATA_LOCATIONS`, which is intentionally
+   not being done yet.
+2. ~~Make the QGC link durable~~ — **done**, see Operational Requirements #2:
+   `scripts/sync_qgc_link_ip.ps1` automates the Comm Link update instead of requiring a
+   manual edit after every WSL restart. (WSL2 mirrored networking, which would remove the
+   dynamic-IP problem at the platform level instead of working around it, was considered and
+   set aside — it was already tried once in an earlier session and abandoned after QGC
+   refused non-14550 ports under it; revisiting that is a larger, separate effort, not blocking
+   anything today.)
 3. **Run DDS-Security through to enforcement** — start the stack with
    `enable_security:=true` and confirm nodes actually come up under `Enforce`.
 4. **Phase 3: QGC Custom Plugin** (separate effort, C++/Qt/QML).
@@ -315,7 +324,11 @@ sensor I/O with no operator relevance.
    NOT Ready". `DATA_LOCATIONS` is currently two placeholder paths under `/tmp/sas/` that
    don't exist on disk, so flipping `STUB_MODE` off today would be a no-op (nothing to wipe);
    it only becomes consequential once real paths are populated there.
-5. **The QGC link depends on a dynamic WSL2 IP** — see "Operational Requirements".
+5. **The QGC link still depends on a dynamic WSL2 IP** — automated via
+   `scripts/sync_qgc_link_ip.ps1` (see "Operational Requirements" #2) rather than eliminated;
+   it still needs running before each QGC launch after a WSL restart. Only switching WSL2 to
+   mirrored networking would remove the underlying dynamic-IP problem itself, and that's a
+   larger, separate effort set aside for now (see "Immediate Next Steps").
 6. **Style debt in SAS:** 356 `E501` (line length) and 21 `D401` (docstring imperative mood)
    findings remain, deliberately left as judgment calls rather than mass-rewritten. 17
    `.pyc` files are also still tracked in git despite `__pycache__/` being ignored
